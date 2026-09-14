@@ -36,6 +36,9 @@ frontend:
   replicaCount: 3
   # The gateway below terminates TLS, so HSTS is correct here.
   publicTls: true
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 2     # at most one UI pod evicted at a time
   resources:
     requests:
       cpu: 25m

@@ -56,10 +56,10 @@ namespace:
 # Application image
 # -----------------------------------------------------------------------------
 image:
-  # Set this to your Docker Hub account. The CI workflow pushes
+  # Docker Hub account. The CI workflow pushes
   # <registry>/<repository>:<commit-sha>.
   registry: docker.io
-  repository: YOUR_DOCKERHUB_USERNAME/employee-api
+  repository: amritmatti/employee-api
   # Overridden per deploy with the commit hash, e.g.
   #   --set image.tag=$(git rev-parse --short HEAD)
   # Defaults to the chart's appVersion when empty.
@@ -86,7 +86,7 @@ frontend:
 
   image:
     registry: docker.io
-    repository: YOUR_DOCKERHUB_USERNAME/employee-frontend
+    repository: amritmatti/employee-frontend
     # Defaults to the chart's appVersion when empty.
     tag: ""
     pullPolicy: IfNotPresent
@@ -118,6 +118,13 @@ frontend:
 
   podAntiAffinity:
     enabled: true
+
+  # Keeps the UI serving through a node drain. Like the API's, this is only
+  # rendered when replicaCount > 1 — a budget of minAvailable 1 over a single
+  # replica makes the pod unevictable and blocks the drain forever.
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
 
   resources:
     requests:

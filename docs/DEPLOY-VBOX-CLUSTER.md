@@ -21,7 +21,7 @@ one actually blocking you; the rest are waiting behind it.
 | 2 | **`~/.kube/config` is stale.** It points at `https://192.168.1.179:8443`, a Keepalived VIP that no longer exists, and its client certs are from the destroyed CA. | `kubectl get nodes` → `dial tcp 192.168.1.179:8443: connectex` | [Phase 1](#phase-1--rebuild-the-cluster) |
 | 3 | **`deploy.sh` will refuse to run.** `cluster.conf` sets `SSH_PASSWORD="ubuntu"`, and `sshpass` is not installed on this workstation. SSH key auth to all four nodes already works, so the password is not needed. | `deploy.sh:294` → `die "SSH_PASSWORD is set but 'sshpass' is not installed"` | [Phase 1](#phase-1--rebuild-the-cluster) |
 | 4 | **No default StorageClass.** `deploy.sh` installs no storage provisioner. PostgreSQL's `volumeClaimTemplate` asks for 2 Gi and will sit `Pending` forever, so the API pods never get past their migration initContainer. | `grep -i provisioner deploy.sh` → nothing | [Phase 2](#phase-2--install-a-storageclass) |
-| 5 | **Neither image is reachable from the cluster.** `employee-api` and `employee-frontend` exist only in Docker Desktop's image store; the nodes run containerd and cannot see them. And both `image.repository` values are still literal placeholders — the chart renders `docker.io/YOUR_DOCKERHUB_USERNAME/employee-api:1.0.0`. | `helm template` output | [Phase 3](#phase-3--get-both-images-onto-the-nodes) |
+| 5 | **Neither image is reachable from the cluster.** `employee-api` and `employee-frontend` exist only in Docker Desktop's image store; the nodes run containerd and cannot see them. And both `image.repository` values are still literal placeholders — the chart renders `docker.io/amritmatti/employee-api:1.0.0`. | `helm template` output | [Phase 3](#phase-3--get-both-images-onto-the-nodes) |
 | 6 | **Istio is not installed.** The chart's preflight fails hard without the CRDs. | `kubectl get crd \| grep istio` → nothing | [Phase 5](#phase-5--add-the-mesh) |
 | 7 | **`restricted` Pod Security rejects the Istio sidecar.** The namespace is labelled `pod-security.kubernetes.io/enforce: restricted`; the `istio-init` container runs as root with `NET_ADMIN`/`NET_RAW`, which that profile forbids. The `istio-cni` node agent removes that init container entirely. | `templates/namespace.yaml` + Istio CNI docs | [Phase 5](#phase-5--add-the-mesh) |
 
@@ -203,14 +203,14 @@ node that already has `:dev` keeps running the old bits. Use a fresh tag
 docker login
 TAG=$(git rev-parse --short=7 HEAD)
 
-docker build -t <you>/employee-api:$TAG      ./app
-docker build -t <you>/employee-frontend:$TAG ./frontend
-docker push  <you>/employee-api:$TAG
-docker push  <you>/employee-frontend:$TAG
+docker build -t amritmatti/employee-api:$TAG      ./app
+docker build -t amritmatti/employee-frontend:$TAG ./frontend
+docker push  amritmatti/employee-api:$TAG
+docker push  amritmatti/employee-frontend:$TAG
 ```
 
-Then deploy with `--set image.repository=<you>/employee-api --set
-image.tag=$TAG --set frontend.image.repository=<you>/employee-frontend --set
+Then deploy with `--set image.repository=amritmatti/employee-api --set
+image.tag=$TAG --set frontend.image.repository=amritmatti/employee-frontend --set
 frontend.image.tag=$TAG`, leaving both registries at the `docker.io` default.
 
 ---
@@ -610,13 +610,13 @@ Everything else in `values.yaml` works as shipped.
 
 | Key | Shipped | Set to | Why |
 |---|---|---|---|
-| `image.repository` | `YOUR_DOCKERHUB_USERNAME/employee-api` | `employee-api` (side-load) or `<you>/employee-api` | Literal placeholder → `ImagePullBackOff` |
+| `image.repository` | `amritmatti/employee-api` | `employee-api` (side-load) or `amritmatti/employee-api` | Literal placeholder → `ImagePullBackOff` |
 | `image.registry` | `docker.io` | `""` when side-loading | Keeps the ref local so containerd does not try to pull |
 | `image.tag` | `""` → falls back to `1.0.0` | `dev`, or the commit SHA | `1.0.0` was never built or pushed |
 | `secrets.dbPassword` | `ChangeMe-Dev-Only-8chars` | generated | Committed default |
 | `secrets.postgresPassword` | `ChangeMe-Dev-Only-8chars` | generated, same value | Must match `dbPassword` — the bundled Postgres creates the app user from it |
 | `istio.enabled` | `true` | `false` for Phase 4, `true` after Phase 5 | Preflight fails without the CRDs |
-| `frontend.image.repository` | `YOUR_DOCKERHUB_USERNAME/employee-frontend` | `employee-frontend`, or `<you>/employee-frontend` | Literal placeholder → `ImagePullBackOff` |
+| `frontend.image.repository` | `amritmatti/employee-frontend` | `employee-frontend`, or `amritmatti/employee-frontend` | Literal placeholder → `ImagePullBackOff` |
 | `frontend.image.registry` | `docker.io` | `""` when side-loading | Keeps the ref local |
 | `frontend.image.tag` | `""` → `1.0.0` | `dev`, or the commit SHA | `1.0.0` was never built |
 | `frontend.publicTls` | `false` | `true` only when TLS terminates in front | `true` over plain http breaks the UI's own assets |
@@ -632,6 +632,7 @@ Left alone deliberately:
 | `autoscaling.enabled` | `false` (dev) | No metrics-server |
 | `frontend.enabled` | `true` | Deploys the UI as its own workload |
 | `frontend.proxyApi` | `true` | Lets the UI work via port-forward, not just the gateway |
+| `frontend.podDisruptionBudget` | `enabled: true`, `minAvailable: 1` | Suppressed automatically at one replica, so dev drains are never blocked |
 
 ---
 
@@ -643,7 +644,7 @@ Left alone deliberately:
 | `SSH_PASSWORD is set but 'sshpass' is not installed` | `cluster.conf` | Step 1.1 |
 | `Istio is not installed in this cluster` | Chart preflight | Phase 5, or `--set istio.enabled=false` |
 | Postgres pod `Pending`, PVC `Pending` | No default StorageClass | Phase 2 |
-| `ImagePullBackOff` on `YOUR_DOCKERHUB_USERNAME/...` | `image.repository` not overridden | Phase 3 |
+| `ImagePullBackOff` on `amritmatti/...` | `image.repository` not overridden | Phase 3 |
 | `ErrImageNeverPull` / `not found` with a local tag | Image not imported on the node the pod landed on | Re-run the Phase 3 loop on **all** workers |
 | `violates PodSecurity "restricted:latest"` | `istio-init` needs root + `NET_ADMIN` | Install `istio-cni` (5.2) |
 | `istio-ingressgateway` EXTERNAL-IP `<pending>` | No load-balancer on bare metal | Patch to NodePort (5.3) |

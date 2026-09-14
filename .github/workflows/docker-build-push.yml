@@ -1,5 +1,13 @@
-# Build the application image and push it to Docker Hub tagged with the commit
-# hash.
+# Build both application images and push them to Docker Hub tagged with the
+# commit hash.
+#
+# There are TWO images, and they are versioned together:
+#   employee-api       ./app       Node.js JSON API
+#   employee-frontend  ./frontend  nginx serving the Employee Directory UI
+#
+# They share a tag on purpose. The chart deploys one release containing both,
+# so a single commit hash identifies the whole thing — `--set image.tag=$SHA
+# --set frontend.image.tag=$SHA` and you know exactly what is running.
 #
 # The commit hash is the whole point: it is immutable, so a running deployment
 # can always be traced back to exactly one commit. `latest` is also pushed from
@@ -13,9 +21,11 @@
 #                        scoped and revoked independently)
 #
 # Optional repository variable:
-#   DOCKERHUB_REPOSITORY  image name, defaults to <username>/employee-api
+#   DOCKERHUB_NAMESPACE  Docker Hub account or org the images live under.
+#                        Defaults to DOCKERHUB_USERNAME. Set this when the
+#                        images belong to an org you push to as a user.
 
-name: Build and Push Docker Image
+name: Build and Push Docker Images
 
 on:
   push:
@@ -26,12 +36,14 @@ on:
     tags:
       - 'v*'
     paths:
-      # Only rebuild when something that lands in the image changes.
+      # Only rebuild when something that lands in an image changes.
       - 'app/**'
+      - 'frontend/**'
       - '.github/workflows/docker-build-push.yml'
   pull_request:
     paths:
       - 'app/**'
+      - 'frontend/**'
   workflow_dispatch:
     inputs:
       push_image:
@@ -49,8 +61,22 @@ permissions:
 
 jobs:
   build-and-push:
-    name: Build and push
+    name: Build ${{ matrix.image.name }}
     runs-on: ubuntu-latest
+
+    strategy:
+      # Push every image that builds. Failing the whole matrix on one failure
+      # would leave the two images on different commits, which is worse than
+      # one missing image you can see in the summary.
+      fail-fast: false
+      matrix:
+        image:
+          - name: employee-api
+            context: ./app
+            dockerfile: ./app/Dockerfile
+          - name: employee-frontend
+            context: ./frontend
+            dockerfile: ./frontend/Dockerfile
 
     steps:
       - name: Check out the repository
@@ -64,10 +90,11 @@ jobs:
           SHA_SHORT="$(git rev-parse --short=7 HEAD)"
           SHA_FULL="$(git rev-parse HEAD)"
 
-          REPO="${{ vars.DOCKERHUB_REPOSITORY }}"
-          if [ -z "$REPO" ]; then
-            REPO="${{ secrets.DOCKERHUB_USERNAME }}/employee-api"
+          NAMESPACE="${{ vars.DOCKERHUB_NAMESPACE }}"
+          if [ -z "$NAMESPACE" ]; then
+            NAMESPACE="${{ secrets.DOCKERHUB_USERNAME }}"
           fi
+          REPO="${NAMESPACE}/${{ matrix.image.name }}"
 
           # The commit hash tag — the deployable identifier.
           TAGS="${REPO}:${SHA_SHORT}"
@@ -110,20 +137,24 @@ jobs:
         id: build
         uses: docker/build-push-action@v6
         with:
-          context: ./app
-          file: ./app/Dockerfile
+          context: ${{ matrix.image.context }}
+          file: ${{ matrix.image.dockerfile }}
           # A pull request build verifies the Dockerfile without publishing.
           push: ${{ github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || inputs.push_image) }}
           tags: ${{ steps.meta.outputs.tags }}
           platforms: linux/amd64,linux/arm64
-          # GitHub Actions layer cache: unchanged dependency layers are reused
-          # across runs, so a code-only change builds in seconds.
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # GitHub Actions layer cache. Scoped per image, or the two builds
+          # would evict each other's layers on every run.
+          cache-from: type=gha,scope=${{ matrix.image.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image.name }}
           build-args: |
             GIT_COMMIT=${{ steps.meta.outputs.sha_full }}
             APP_VERSION=${{ steps.meta.outputs.sha_short }}
             BUILD_DATE=${{ steps.meta.outputs.build_date }}
+          # Supply-chain attestations. These make the pushed artifact an image
+          # index with an extra "unknown/unknown" entry — fine for kubelet,
+          # which resolves by platform, but `ctr images import` can refuse it.
+          # Side-loading onto nodes? Build locally with --provenance=false.
           provenance: true
           sbom: true
 
@@ -131,7 +162,7 @@ jobs:
         if: always()
         run: |
           {
-            echo "### Docker image"
+            echo "### ${{ matrix.image.name }}"
             echo ""
             echo "| | |"
             echo "|---|---|"
@@ -140,12 +171,50 @@ jobs:
             echo "| Digest | \`${{ steps.build.outputs.digest }}\` |"
             echo "| Pushed | ${{ github.event_name != 'pull_request' }} |"
             echo ""
-            echo "Deploy this exact build:"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  deploy-command:
+    name: Deploy command
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: github.event_name != 'pull_request'
+    steps:
+      - name: Print the helm command for this commit
+        run: |
+          set -euo pipefail
+
+          NAMESPACE="${{ vars.DOCKERHUB_NAMESPACE }}"
+          if [ -z "$NAMESPACE" ]; then
+            NAMESPACE="${{ secrets.DOCKERHUB_USERNAME }}"
+          fi
+          SHA_SHORT="${GITHUB_SHA:0:7}"
+
+          {
+            echo "### Deploy this exact build"
+            echo ""
+            echo "Both images carry the same tag, so one commit hash pins the"
+            echo "whole release."
             echo ""
             echo '```bash'
+            echo "# The namespace must exist first — Helm writes its release Secret"
+            echo "# into it — but the chart renders its own Namespace for the"
+            echo "# istio-injection and PodSecurity labels. So pre-create it with"
+            echo "# Helm's ownership metadata and let the chart adopt it."
+            echo "# Do NOT pass --create-namespace: that fails ownership validation."
+            echo "kubectl create namespace employee-app"
+            echo "kubectl label namespace employee-app app.kubernetes.io/managed-by=Helm --overwrite"
+            echo "kubectl annotate namespace employee-app \\"
+            echo "  meta.helm.sh/release-name=employee-api \\"
+            echo "  meta.helm.sh/release-namespace=employee-app --overwrite"
+            echo ""
             echo "helm upgrade --install employee-api ./charts/employee-api \\"
-            echo "  --namespace employee-app --create-namespace \\"
-            echo "  --set image.repository=${{ steps.meta.outputs.repository }} \\"
-            echo "  --set image.tag=${{ steps.meta.outputs.sha_short }}"
+            echo "  --namespace employee-app \\"
+            echo "  --set image.repository=${NAMESPACE}/employee-api \\"
+            echo "  --set image.tag=${SHA_SHORT} \\"
+            echo "  --set frontend.image.repository=${NAMESPACE}/employee-frontend \\"
+            echo "  --set frontend.image.tag=${SHA_SHORT} \\"
+            echo "  --set secrets.dbPassword=\"\$DB_PASSWORD\" \\"
+            echo "  --set secrets.postgresPassword=\"\$DB_PASSWORD\" \\"
+            echo "  --wait --timeout 10m"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"

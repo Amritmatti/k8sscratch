@@ -102,9 +102,9 @@ export TAG=$(git rev-parse --short=7 HEAD)
 
 helm upgrade --install employee-api ./charts/employee-api \
   --namespace employee-app \
-  --set image.repository=YOUR_DOCKERHUB_USERNAME/employee-api \
+  --set image.repository=amritmatti/employee-api \
   --set image.tag=$TAG \
-  --set frontend.image.repository=YOUR_DOCKERHUB_USERNAME/employee-frontend \
+  --set frontend.image.repository=amritmatti/employee-frontend \
   --set frontend.image.tag=$TAG \
   --set secrets.dbPassword="$DB_PASSWORD" \
   --set secrets.postgresPassword="$DB_PASSWORD" \
@@ -247,7 +247,7 @@ k8sscratch/
 | `PeerAuthentication` | mTLS **STRICT** — plaintext is refused |
 | `AuthorizationPolicy` x5 | Default-deny, then allow gateway / metrics / probes / frontend |
 | `NetworkPolicy` x3 | API egress limited to DNS + Postgres; DB ingress to API only; frontend egress to DNS + API only |
-| `PodDisruptionBudget` | Keeps a replica serving during node drains |
+| `PodDisruptionBudget` x2 | Keeps a replica of the API *and* of the frontend serving during node drains. Only rendered when that workload has more than one replica — a budget over a single replica makes its pod unevictable and blocks the drain outright |
 | `HorizontalPodAutoscaler` | Enabled in the prod overlay |
 | `ServiceMonitor` | Prometheus scraping (prod overlay) |
 

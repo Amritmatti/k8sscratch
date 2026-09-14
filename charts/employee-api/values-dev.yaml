@@ -40,6 +40,8 @@ frontend:
   replicaCount: 1
   podAntiAffinity:
     enabled: false      # single-node clusters have nowhere to spread to
+  podDisruptionBudget:
+    enabled: false      # one replica: a PDB would block node drains
   publicTls: false      # reached over plain http via the gateway NodePort
 
 postgresql:

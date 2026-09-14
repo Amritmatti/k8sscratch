@@ -18,3 +18,30 @@ spec:
       {{- include "employee-api.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: api
 {{- end }}
+{{- /*
+  The frontend needs the same protection for the same reason: without a PDB a
+  node drain can evict every UI pod at once, and the site is down while the API
+  behind it stays up. Kept in this file rather than a frontend-*.yaml of its own
+  so both budgets — and the single-replica guard they share — sit side by side
+  and cannot drift apart.
+
+  No autoscaling lookup here: the frontend has no HPA, so replicaCount is
+  always the real floor.
+*/}}
+{{- if and .Values.frontend.enabled .Values.frontend.podDisruptionBudget.enabled (gt (int .Values.frontend.replicaCount) 1) }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "employee-api.frontend.fullname" . }}
+  namespace: {{ include "employee-api.namespace" . }}
+  labels:
+    {{- include "employee-api.labels" . | nindent 4 }}
+    app.kubernetes.io/component: frontend
+spec:
+  minAvailable: {{ .Values.frontend.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "employee-api.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: frontend
+{{- end }}

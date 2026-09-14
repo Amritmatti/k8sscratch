@@ -226,7 +226,7 @@ $env:DB_PASSWORD = [Convert]::ToBase64String((1..24 | ForEach-Object { Get-Rando
 ```bash
 helm upgrade --install employee-api ./charts/employee-api \
   --namespace employee-app \
-  --set image.repository=YOUR_DOCKERHUB_USERNAME/employee-api \
+  --set image.repository=amritmatti/employee-api \
   --set image.tag=$(git rev-parse --short=7 HEAD) \
   --set secrets.dbPassword="$DB_PASSWORD" \
   --set secrets.postgresPassword="$DB_PASSWORD" \

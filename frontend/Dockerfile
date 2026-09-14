@@ -30,11 +30,13 @@ COPY --chown=101:101 public/ /usr/share/nginx/html/
 
 ARG GIT_COMMIT=unknown
 ARG APP_VERSION=dev
+ARG BUILD_DATE=unknown
 
 LABEL org.opencontainers.image.title="employee-frontend" \
       org.opencontainers.image.description="Employee Directory UI (static, served by nginx)" \
       org.opencontainers.image.revision="${GIT_COMMIT}" \
       org.opencontainers.image.version="${APP_VERSION}" \
+      org.opencontainers.image.created="${BUILD_DATE}" \
       org.opencontainers.image.licenses="MIT"
 
 EXPOSE 8080
