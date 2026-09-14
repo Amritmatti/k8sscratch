@@ -25,15 +25,40 @@ started — the reason lives in the events at the bottom.
 
 ## Install and upgrade
 
-### `no matches for kind "Gateway" in version "networking.istio.io/v1"`
+### `Istio is not installed in this cluster`
 
-Istio is not installed, so its CRDs do not exist.
+The chart's preflight check. Install Istio:
 
 ```bash
-istioctl install --set profile=demo -y
+./scripts/install-istio.sh
 ```
 
-Or deploy without the mesh: `--set istio.enabled=false`.
+or deploy without the mesh — you lose ingress, mTLS and the authorization
+policies, and reach the API by port-forward:
+
+```bash
+helm upgrade --install employee-api ./charts/employee-api   --namespace employee-app --set istio.enabled=false
+```
+
+### `no matches for kind "Gateway" in version "networking.istio.io/v1"`
+
+The same problem, reported by Helm rather than the chart — you will see this if
+`istio.requireCRDs=false` was set, which switches the preflight check off.
+
+Turn the check back on (drop the flag) for a clearer message, then install
+Istio. `requireCRDs=false` exists only for `helm template` and CI, which have
+no cluster to query.
+
+### `Namespace "employee-app" ... cannot be imported into the current release`
+
+You passed `--create-namespace`. Do not: the chart renders its own `Namespace`
+so it can apply the `istio-injection` and PodSecurity labels. Helm pre-creating
+it produces an unowned namespace the release cannot adopt.
+
+```bash
+kubectl delete namespace employee-app     # if it is empty and yours
+helm upgrade --install employee-api ./charts/employee-api --namespace employee-app
+```
 
 ### `namespaces "employee-app" already exists`
 

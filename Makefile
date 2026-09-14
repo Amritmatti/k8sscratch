@@ -105,10 +105,12 @@ dev-down: ## Stop the local stack and delete its data
 # Helm
 # ---------------------------------------------------------------------------
 .PHONY: lint
+# --set istio.requireCRDs=false: lint and template never talk to a cluster, so
+# the chart's Istio CRD preflight check cannot run there.
 lint: ## Lint the chart against every values file
-	helm lint $(CHART)
-	helm lint $(CHART) -f $(CHART)/values-dev.yaml
-	helm lint $(CHART) -f $(CHART)/values-prod.yaml
+	helm lint $(CHART) --set istio.requireCRDs=false
+	helm lint $(CHART) -f $(CHART)/values-dev.yaml --set istio.requireCRDs=false
+	helm lint $(CHART) -f $(CHART)/values-prod.yaml --set istio.requireCRDs=false
 
 .PHONY: template
 template: ## Render manifests to stdout
@@ -116,6 +118,7 @@ template: ## Render manifests to stdout
 	  --namespace $(NAMESPACE) \
 	  --set image.repository=$(IMAGE_REPO) \
 	  --set image.tag=$(TAG) \
+	  --set istio.requireCRDs=false \
 	  $(VALUES)
 
 .PHONY: diff

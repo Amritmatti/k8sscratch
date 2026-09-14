@@ -199,18 +199,24 @@ jobs:
           for values in "" "-f charts/employee-api/values-dev.yaml" "-f charts/employee-api/values-prod.yaml"; do
             echo "::group::helm lint ${values:-(defaults)}"
             # shellcheck disable=SC2086
-            helm lint charts/employee-api $values
+            helm lint charts/employee-api $values --set istio.requireCRDs=false
             echo "::endgroup::"
           done
 
       - name: Render manifests
+        # istio.requireCRDs=false: the chart's preflight check asks the cluster
+        # whether the Istio CRDs exist, and `helm template` has no cluster to
+        # ask. Without this the render stops with the "Istio is not installed"
+        # message — correct behaviour, wrong context.
         run: |
           mkdir -p rendered
           helm template employee-api charts/employee-api \
-            --namespace employee-app > rendered/default.yaml
+            --namespace employee-app \
+            --set istio.requireCRDs=false > rendered/default.yaml
           helm template employee-api charts/employee-api \
             -f charts/employee-api/values-prod.yaml \
-            --namespace employee-prod --set image.tag=ci > rendered/prod.yaml
+            --namespace employee-prod --set image.tag=ci \
+            --set istio.requireCRDs=false > rendered/prod.yaml
 
       - name: Validate against the Kubernetes API schema
         run: |

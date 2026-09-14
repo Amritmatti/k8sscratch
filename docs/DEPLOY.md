@@ -102,20 +102,59 @@ one node).
 ## Installing Istio
 
 The chart creates `Gateway`, `VirtualService`, `DestinationRule`,
-`PeerAuthentication` and `AuthorizationPolicy` objects. Without Istio installed
-those CRDs do not exist and `helm install` fails with
-`no matches for kind "Gateway"`.
+`PeerAuthentication` and `AuthorizationPolicy` objects. Without Istio those CRDs
+do not exist, and the chart stops before Helm gets that far:
+
+```
+Istio is not installed in this cluster.
+...
+Pick one:
+  1. Install Istio ...
+  2. Deploy without the mesh ...
+```
+
+The preflight check exists so you get one actionable message instead of a
+"resource mapping not found" line per object.
+
+### Option A — the helper script (no extra tools)
 
 ```bash
-# Install istioctl
+./scripts/install-istio.sh
+```
+
+Installs `istio-base`, `istiod` and `istio-ingressgateway` with Helm, in that
+order, then reports how to reach the gateway. Pin a version with
+`ISTIO_VERSION=1.24.2 ./scripts/install-istio.sh`; remove it with
+`./scripts/install-istio.sh --uninstall`.
+
+### Option B — Helm by hand
+
+```bash
+helm repo add istio https://istio-release.storage.googleapis.com/charts
+helm repo update
+
+helm install istio-base istio/base -n istio-system --create-namespace --wait
+helm install istiod istio/istiod -n istio-system --wait
+helm install istio-ingressgateway istio/gateway -n istio-system --wait
+```
+
+### Option C — istioctl
+
+```bash
 curl -L https://istio.io/downloadIstio | sh -
 cd istio-*/ && export PATH=$PWD/bin:$PATH
 
 istioctl install --set profile=demo -y
+```
 
+Verify whichever you chose:
+
+```bash
 kubectl get pods -n istio-system
 # istiod-...                 1/1 Running
 # istio-ingressgateway-...   1/1 Running
+
+kubectl get crd | grep -c istio.io      # expect 12+
 ```
 
 The `demo` profile is fine for evaluation. Use `default` for production — it
@@ -146,9 +185,15 @@ helm upgrade --install employee-api ./charts/employee-api \
 
 ### 1. Namespace
 
-The chart creates the namespace itself, so it can apply the
-`istio-injection=enabled` and PodSecurity labels. Pass `--namespace` but **not**
-`--create-namespace`:
+> **Do not pass `--create-namespace`.** The chart renders its own `Namespace`
+> object so it can apply the `istio-injection=enabled` and PodSecurity labels.
+> `--create-namespace` makes Helm create the namespace first, without those
+> labels and without release ownership, and the install then fails with
+> `invalid ownership metadata ... exists and cannot be imported into the
+> current release`.
+>
+> Pass `--namespace` on its own. Helm creates and owns the namespace from the
+> chart.
 
 ```bash
 helm upgrade --install employee-api ./charts/employee-api \

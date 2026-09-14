@@ -202,15 +202,19 @@ function Task-Verify {
 }
 
 function Task-Lint {
+    # istio.requireCRDs=false: lint and template never talk to a cluster, so
+    # the chart's Istio CRD preflight check cannot run there.
     Write-Step 'Linting the chart'
-    Invoke-Checked helm @('lint', $Chart)
-    Invoke-Checked helm @('lint', $Chart, '-f', "$Chart/values-dev.yaml")
-    Invoke-Checked helm @('lint', $Chart, '-f', "$Chart/values-prod.yaml")
+    $noCrd = @('--set', 'istio.requireCRDs=false')
+    Invoke-Checked helm (@('lint', $Chart) + $noCrd)
+    Invoke-Checked helm (@('lint', $Chart, '-f', "$Chart/values-dev.yaml") + $noCrd)
+    Invoke-Checked helm (@('lint', $Chart, '-f', "$Chart/values-prod.yaml") + $noCrd)
 }
 
 function Task-Template {
     & helm template $Release $Chart --namespace $Namespace `
-        --set "image.repository=$ImageRepo" --set "image.tag=$Tag" @(Get-ValuesArgs)
+        --set "image.repository=$ImageRepo" --set "image.tag=$Tag" `
+        --set 'istio.requireCRDs=false' @(Get-ValuesArgs)
 }
 
 function Task-Deploy {
