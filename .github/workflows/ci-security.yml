@@ -126,21 +126,42 @@ jobs:
   image-scan:
     name: Image vulnerability scan
     runs-on: ubuntu-latest
+    env:
+      # Keep the vulnerability database somewhere actions/cache can see it.
+      # Uncached, every run re-downloads ~113 MB and eventually trips the
+      # registry's rate limit.
+      TRIVY_CACHE_DIR: ${{ github.workspace }}/.trivycache
+      TRIVY_SKIP_VERSION_CHECK: 'true'
     steps:
       - uses: actions/checkout@v4
 
       - name: Build image for scanning
         run: docker build -t employee-api:scan ./app
 
-      - name: Trivy (fail on HIGH/CRITICAL)
+      - name: Cache the Trivy vulnerability database
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.trivycache
+          key: trivy-db-${{ github.run_id }}
+          restore-keys: trivy-db-
+
+      # Two steps, deliberately.
+      #
+      # trivy-action ignores `severity` and `ignore-unfixed` when `format` is
+      # sarif — it logs "Building SARIF report with all severities" and drops
+      # those flags from the command. Combining that with `exit-code: 1` in a
+      # single step fails the job on a finding of ANY severity, and because the
+      # output goes to a file the log shows nothing about what actually broke.
+      #
+      # So: report everything to the Security tab, then gate separately with
+      # output a human can read.
+      - name: Trivy - full report for the Security tab
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: employee-api:scan
           format: sarif
           output: trivy-image.sarif
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true      # do not block on CVEs with no patch yet
-          exit-code: '1'
+          exit-code: '0'            # informational; the gate is the next step
 
       - name: Upload results
         if: always()
@@ -148,6 +169,18 @@ jobs:
         with:
           sarif_file: trivy-image.sarif
           category: trivy-image
+
+      - name: Trivy - gate on fixable HIGH/CRITICAL
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: employee-api:scan
+          # Table rather than sarif, so a failure prints the offending packages
+          # straight into the job log.
+          format: table
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true      # do not block on CVEs with no patch yet
+          scanners: vuln            # gitleaks already covers secret scanning
+          exit-code: '1'
 
   # ---------------------------------------------------------------------------
   helm-validate:

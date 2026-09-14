@@ -44,7 +44,24 @@ FROM node:22-alpine AS runtime
 # dumb-init reaps zombies and forwards signals. Without an init, Node runs as
 # PID 1, where the default SIGTERM handler does not exist and the graceful
 # shutdown in server.js would never run.
-RUN apk add --no-cache dumb-init=~1.2 \
+#
+# `apk upgrade` picks up patched OS packages released after the base image was
+# built. Without it the image inherits whatever libssl/libcrypto version the
+# base was tagged with, which is how a scanner reports HIGH findings against an
+# image whose own Dockerfile installs almost nothing.
+#
+# npm and corepack are then deleted. The runtime entrypoint is
+# `node src/server.js` — npm is never invoked after the build, but its ~600
+# bundled dependencies are scanned, and they account for every Node-level CVE
+# this image would otherwise report. Removing it also takes a package manager
+# away from anyone who achieves code execution in the container.
+RUN apk upgrade --no-cache \
+    && apk add --no-cache dumb-init=~1.2 \
+    && rm -rf /usr/local/lib/node_modules/npm \
+              /usr/local/lib/node_modules/corepack \
+              /usr/local/bin/npm \
+              /usr/local/bin/npx \
+              /usr/local/bin/corepack \
     && rm -rf /var/cache/apk/*
 
 ENV NODE_ENV=production \
@@ -77,13 +94,21 @@ LABEL org.opencontainers.image.title="employee-api" \
       org.opencontainers.image.source="https://github.com/OWNER/REPO" \
       org.opencontainers.image.licenses="MIT"
 
-USER node
+# Numeric, not `USER node`, for two reasons:
+#   - Kubernetes `runAsNonRoot: true` cannot verify a *named* user is non-root,
+#     so the kubelet refuses to start the container unless `runAsUser` is also
+#     set in the securityContext. A numeric UID here removes that dependency.
+#   - hadolint DL3066 flags non-numeric user ids for the same reason.
+# uid/gid 1000 is the `node` user that ships in the base image.
+USER 1000:1000
 
 EXPOSE 3000 9090
 
 # Informational only — Kubernetes uses the probes in the Helm chart, not this.
+# Exec (JSON) form: the shell form wraps the command in `/bin/sh -c`, which
+# adds a shell process to every health check and is flagged by hadolint DL3025.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
-    CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3000)+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+    CMD ["node", "-e", "fetch('http://127.0.0.1:'+(process.env.PORT||3000)+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
 
 ENTRYPOINT ["dumb-init", "--"]
 CMD ["node", "src/server.js"]
