@@ -36,6 +36,12 @@ podDisruptionBudget:
 podAntiAffinity:
   enabled: false           # single-node clusters have nowhere to spread to
 
+frontend:
+  replicaCount: 1
+  podAntiAffinity:
+    enabled: false      # single-node clusters have nowhere to spread to
+  publicTls: false      # reached over plain http via the gateway NodePort
+
 postgresql:
   enabled: true
   persistence:

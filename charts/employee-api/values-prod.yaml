@@ -32,6 +32,17 @@ config:
   dbPoolMax: "20"
   dbSsl: "true"
 
+frontend:
+  replicaCount: 3
+  # The gateway below terminates TLS, so HSTS is correct here.
+  publicTls: true
+  resources:
+    requests:
+      cpu: 25m
+      memory: 48Mi
+    limits:
+      memory: 192Mi
+
 autoscaling:
   enabled: true
   minReplicas: 3

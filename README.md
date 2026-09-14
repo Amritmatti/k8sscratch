@@ -1,8 +1,13 @@
 # Employee API — DevOps / DevSecOps Reference Project
 
-A Node.js REST API storing employee records in PostgreSQL, deployed to
-Kubernetes with Helm, exposed through an Istio ingress gateway, and built by
-GitHub Actions into a Docker Hub image tagged with the commit hash.
+A Node.js REST API storing employee records in PostgreSQL, with a browser UI
+in front of it, deployed to Kubernetes with Helm, exposed through an Istio
+ingress gateway, and built by GitHub Actions into Docker Hub images tagged
+with the commit hash.
+
+**Two workloads, two images.** The API is a pure JSON service; the Employee
+Directory UI is a separate Deployment serving static files from nginx. They
+scale independently and a UI rollout cannot restart the API.
 
 **Record fields:** `ID`, `Name`, `DOB`, `Designation`, `DOJ`.
 
@@ -16,19 +21,22 @@ GitHub Actions into a Docker Hub image tagged with the commit hash.
                     ║  istio-injection=enabled                 ║
                     ║  PodSecurity: restricted                 ║
                     ║                                          ║
-                    ║   ┌────────────────┐   mTLS STRICT       ║
-                    ║   │ employee-api   │◀────────────────┐   ║
-                    ║   │ Deployment x2  │                 │   ║
-                    ║   │  ├ initC:      │                 │   ║
-                    ║   │  │  migrate    │                 │   ║
-                    ║   │  ├ api :3000   │─── NetworkPolicy┼─┐ ║
-                    ║   │  └ envoy       │                 │ │ ║
-                    ║   └────────────────┘                 │ │ ║
-                    ║                                      │ │ ║
-                    ║   ┌────────────────┐                 │ │ ║
-                    ║   │ postgresql     │◀────────────────┘ │ ║
-                    ║   │ StatefulSet    │   only API pods ──┘ ║
-                    ║   │  + PVC 8Gi     │                     ║
+                    ║    "/"  │              │ /api /healthz   ║
+                    ║         ▼              ▼ /readyz         ║
+                    ║   ┌──────────────┐  ┌────────────────┐   ║
+                    ║   │ frontend     │  │ employee-api   │   ║
+                    ║   │ Deployment   │  │ Deployment x2  │   ║
+                    ║   │  ├ nginx:8080│  │  ├ initC:      │   ║
+                    ║   │  └ envoy     │  │  │  migrate    │   ║
+                    ║   └──────┬───────┘  │  ├ api :3000   │   ║
+                    ║          │          │  └ envoy       │   ║
+                    ║          └─ /api ──▶└───────┬────────┘   ║
+                    ║             (fallback)      │            ║
+                    ║              mTLS STRICT    │            ║
+                    ║   ┌────────────────┐        │            ║
+                    ║   │ postgresql     │◀───────┘            ║
+                    ║   │ StatefulSet    │  only API pods,     ║
+                    ║   │  + PVC 8Gi     │  by NetworkPolicy   ║
                     ║   └────────────────┘                     ║
                     ╚══════════════════════════════════════════╝
 ```
@@ -56,29 +64,74 @@ curl -X POST http://127.0.0.1:3080/api/v1/employees \
 
 ### 2. Deploy to Kubernetes
 
+These steps are **ordered** — each one depends on the last.
+
 ```bash
-# 1. Istio first — the chart needs its CRDs
+# 1. A default StorageClass, or the PostgreSQL PVC never binds.
+#    Skip only if `kubectl get sc` already shows one marked (default).
+kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.37/deploy/local-path-storage.yaml
+kubectl patch storageclass local-path \
+  -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
+
+# 2. Istio — the chart needs its CRDs.
 ./scripts/install-istio.sh
 
-# 2. Then the app.
-#    --namespace, NOT --create-namespace: the chart renders its own Namespace
-#    so it can apply the istio-injection and PodSecurity labels.
+# 3. The CNI node agent. Without it istiod injects an `istio-init` container
+#    that runs as root with NET_ADMIN, which this namespace's `restricted`
+#    Pod Security profile rejects. Installing the chart is not enough: istiod
+#    has to be told to use it.
+helm upgrade --install istio-cni istio/cni -n istio-system --wait
+helm upgrade istiod istio/istiod -n istio-system --set cni.enabled=true --wait
+
+# 4. The namespace. Helm writes its release Secret into the namespace, so it
+#    must exist first — but the chart also renders its own Namespace for the
+#    istio-injection and PodSecurity labels. Create it carrying Helm's
+#    ownership metadata so the chart adopts it and still applies those labels.
+#    (Do NOT use --create-namespace: that fails with `invalid ownership
+#    metadata`.)
+kubectl create namespace employee-app
+kubectl label namespace employee-app app.kubernetes.io/managed-by=Helm --overwrite
+kubectl annotate namespace employee-app \
+  meta.helm.sh/release-name=employee-api \
+  meta.helm.sh/release-namespace=employee-app --overwrite
+
+# 5. The release. Hex, not base64: `openssl rand -base64` emits '=' and '/',
+#    which break Helm's --set parser.
+export DB_PASSWORD="$(openssl rand -hex 16)"
+export TAG=$(git rev-parse --short=7 HEAD)
+
 helm upgrade --install employee-api ./charts/employee-api \
   --namespace employee-app \
   --set image.repository=YOUR_DOCKERHUB_USERNAME/employee-api \
-  --set image.tag=$(git rev-parse --short=7 HEAD) \
-  --set secrets.dbPassword="$(openssl rand -base64 24)" \
-  --set secrets.postgresPassword="$(openssl rand -base64 24)" \
-  --wait
+  --set image.tag=$TAG \
+  --set frontend.image.repository=YOUR_DOCKERHUB_USERNAME/employee-frontend \
+  --set frontend.image.tag=$TAG \
+  --set secrets.dbPassword="$DB_PASSWORD" \
+  --set secrets.postgresPassword="$DB_PASSWORD" \
+  --wait --timeout 10m
 
 helm test employee-api -n employee-app
 ```
 
-Don't want the mesh? `--set istio.enabled=false` and reach the API with
-`kubectl port-forward`.
+Both images must already be pushed, or side-loaded onto the nodes — see
+[docs/BUILD.md](docs/BUILD.md).
 
-Full walkthrough, including installing Istio and getting a cluster:
-**[docs/DEPLOY.md](docs/DEPLOY.md)**.
+Reaching it: on bare metal the ingress gateway has no LoadBalancer address, so
+patch it to a NodePort and open `http://<node-ip>:<nodePort>/`.
+
+```bash
+kubectl -n istio-system patch svc istio-ingressgateway -p '{"spec":{"type":"NodePort"}}'
+kubectl -n istio-system get svc istio-ingressgateway
+```
+
+Don't want the mesh? `--set istio.enabled=false`, then
+`kubectl port-forward svc/employee-api-frontend 8080:80` — nginx proxies
+`/api` through to the API, so the whole application works on that one port.
+
+Full walkthrough: **[docs/DEPLOY.md](docs/DEPLOY.md)** for a generic cluster,
+or **[docs/DEPLOY-VBOX-CLUSTER.md](docs/DEPLOY-VBOX-CLUSTER.md)** for the
+step-by-step that was actually executed against a bare-metal kubeadm cluster,
+with every trap it hit.
 
 ---
 
@@ -89,6 +142,7 @@ Full walkthrough, including installing Istio and getting a cluster:
 | **[docs/BUILD.md](docs/BUILD.md)** | Building the image, the CI pipeline, Docker Hub setup |
 | **[docs/RUN.md](docs/RUN.md)** | Running locally with Compose or bare Node, running tests |
 | **[docs/DEPLOY.md](docs/DEPLOY.md)** | Getting a cluster, installing Istio, Helm deploy, upgrade, rollback |
+| **[docs/DEPLOY-VBOX-CLUSTER.md](docs/DEPLOY-VBOX-CLUSTER.md)** | Ordered, gated walkthrough on a bare-metal kubeadm cluster — storage, side-loading images, istio-cni, and the traps |
 | **[docs/API.md](docs/API.md)** | Endpoint reference with request and response examples |
 | **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** | How it is put together and why |
 | **[docs/SECURITY.md](docs/SECURITY.md)** | The DevSecOps controls and what each one actually stops |
@@ -146,6 +200,10 @@ k8sscratch/
 │   ├── tests/                    22 unit, 13 integration
 │   └── Dockerfile                multi-stage, non-root, read-only rootfs
 │
+├── frontend/                     Employee Directory UI (separate image)
+│   ├── public/                   index.html, app.css, app.js — no build step
+│   └── Dockerfile                nginx-unprivileged, uid 101, listens on 8080
+│
 ├── charts/employee-api/          Helm chart
 │   ├── values.yaml               ALL config and secrets
 │   ├── values-dev.yaml           dev overlay
@@ -153,6 +211,7 @@ k8sscratch/
 │   └── templates/
 │       ├── namespace.yaml        istio-injection + PodSecurity restricted
 │       ├── deployment.yaml       API + migration initContainer
+│       ├── frontend-*.yaml       UI Deployment, Service, SA, nginx ConfigMap
 │       ├── postgresql.yaml       StatefulSet + PVC + Services
 │       ├── istio-*.yaml          Gateway, VirtualService, DestinationRule,
 │       │                         PeerAuthentication, AuthorizationPolicy
@@ -177,16 +236,17 @@ k8sscratch/
 | Object | Purpose |
 |---|---|
 | `Namespace` | Isolation, `istio-injection=enabled`, PodSecurity `restricted` |
-| `Deployment` | 2 API replicas, migration initContainer, anti-affinity |
+| `Deployment` x2 | API (migration initContainer, anti-affinity) and the frontend (nginx, uid 101, read-only rootfs) |
 | `StatefulSet` | PostgreSQL 16 with an 8 Gi PVC (dev only — use a managed DB in prod) |
-| `Service` x3 | API (`http-api`, `http-metrics`), Postgres, Postgres headless |
-| `ConfigMap` | Non-secret configuration |
+| `Service` x4 | API (`http-api`, `http-metrics`), frontend (`http-ui`), Postgres, Postgres headless |
+| `ServiceAccount` x2 | Separate identities, so the API's AuthorizationPolicy can name the frontend specifically |
+| `ConfigMap` x2 | Non-secret configuration, and the rendered nginx config |
 | `Secret` | Database credentials |
-| `Gateway` + `VirtualService` | Istio ingress, retries, timeouts |
+| `Gateway` + `VirtualService` | Istio ingress, retries, timeouts. Splits by path: `/api`, `/healthz`, `/readyz` to the API, everything else to the frontend |
 | `DestinationRule` | mTLS, connection pooling, outlier ejection |
 | `PeerAuthentication` | mTLS **STRICT** — plaintext is refused |
-| `AuthorizationPolicy` x4 | Default-deny, then allow gateway / metrics / probes |
-| `NetworkPolicy` x2 | API egress limited to DNS + Postgres; DB ingress to API only |
+| `AuthorizationPolicy` x5 | Default-deny, then allow gateway / metrics / probes / frontend |
+| `NetworkPolicy` x3 | API egress limited to DNS + Postgres; DB ingress to API only; frontend egress to DNS + API only |
 | `PodDisruptionBudget` | Keeps a replica serving during node drains |
 | `HorizontalPodAutoscaler` | Enabled in the prod overlay |
 | `ServiceMonitor` | Prometheus scraping (prod overlay) |
@@ -206,13 +266,19 @@ Everything below was executed against real infrastructure, not just written:
 - **Full CRUD exercised** over HTTP against real Postgres; dates round-trip as
   calendar dates with no timezone drift.
 - **Migrations are idempotent** — a second run reports `applied: 0`.
-- **Chart lints and renders** cleanly for all three value sets (22 / 17 / 19
-  objects), and every rendered document is valid YAML with the expected
-  `apiVersion`, `kind` and `metadata.name`.
+- **Chart lints and renders** cleanly for all three value sets, and every
+  rendered document is valid YAML with the expected `apiVersion`, `kind` and
+  `metadata.name`.
+- **Deployed to a real cluster** — a 4-node bare-metal kubeadm cluster
+  (Kubernetes 1.33, Calico, containerd) with Istio 1.30 and the sidecar
+  injected: API and frontend both `2/2 Running`, `helm test` green, and full
+  CRUD driven through the ingress gateway *and* through the UI in a real
+  browser. The ordered walkthrough, including every trap it hit, is in
+  [docs/DEPLOY-VBOX-CLUSTER.md](docs/DEPLOY-VBOX-CLUSTER.md).
 
-Not yet verified: a live `helm install` against a running cluster, because no
-cluster is currently reachable from this machine. See
-[docs/DEPLOY.md](docs/DEPLOY.md#getting-a-cluster) for the three ways to get one.
+Not verified: the production overlay's TLS path — `frontend.publicTls: true`
+and the gateway's `credentialName` render correctly but have never run against
+a real TLS endpoint.
 
 ---
 
@@ -224,7 +290,8 @@ cluster is currently reachable from this machine. See
 | Node.js | 20+ | Running tests outside a container |
 | kubectl | 1.28+ | Talking to the cluster |
 | Helm | 3.12+ | Deploying |
-| Istio | 1.20+ | Ingress and mesh policy |
+| Istio | 1.20+ | Ingress and mesh policy (plus the `cni` chart, for `restricted` Pod Security) |
+| A default StorageClass | — | The PostgreSQL PVC; `local-path` is fine for a lab |
 
 ---
 

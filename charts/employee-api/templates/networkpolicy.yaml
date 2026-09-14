@@ -33,6 +33,18 @@ spec:
       ports:
         - protocol: TCP
           port: {{ .Values.service.targetPort }}
+    {{- if and .Values.frontend.enabled .Values.frontend.proxyApi }}
+    # From the UI's nginx when it proxies /api. Selected by pod label, so no
+    # other workload in this namespace gains access.
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "employee-api.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: frontend
+      ports:
+        - protocol: TCP
+          port: {{ .Values.service.targetPort }}
+    {{- end }}
     # From Prometheus, to the metrics port only.
     - from:
         - namespaceSelector:
@@ -111,5 +123,70 @@ spec:
       ports:
         - protocol: TCP
           port: 5432
+{{- end }}
+{{- if .Values.frontend.enabled }}
+---
+# The frontend. It serves static files and, optionally, proxies to the API —
+# so it needs no database access and no general egress at all.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullName }}-frontend
+  namespace: {{ $ns }}
+  labels:
+    {{- include "employee-api.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "employee-api.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: frontend
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.ingressNamespace }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.frontend.containerPort }}
+    # Kubelet probes come from the node, which has no namespace label, so this
+    # rule cannot be narrowed. Without it the pods never become Ready.
+    - ports:
+        - protocol: TCP
+          port: {{ .Values.frontend.containerPort }}
+  egress:
+    {{- if .Values.networkPolicy.allowDNS }}
+    # DNS, or nginx cannot resolve the API Service name.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    {{- end }}
+    {{- if .Values.frontend.proxyApi }}
+    # To the API, and nothing else.
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "employee-api.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: api
+      ports:
+        - protocol: TCP
+          port: {{ .Values.service.targetPort }}
+    {{- end }}
+    # To the Istio control plane, for certificates and configuration.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: istio-system
+      ports:
+        - protocol: TCP
+          port: 15012
 {{- end }}
 {{- end }}

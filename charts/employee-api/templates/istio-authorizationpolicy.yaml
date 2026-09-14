@@ -36,6 +36,12 @@ spec:
             # mTLS certificate, which cannot be spoofed by another pod.
             principals:
               - {{ .Values.istio.authorizationPolicy.ingressGatewayPrincipal | quote }}
+              {{- if and .Values.frontend.enabled .Values.frontend.proxyApi }}
+              # The UI's nginx, when it proxies /api instead of the gateway
+              # routing there directly. Named by its own service account, so
+              # this grants nothing to anything else in the namespace.
+              - {{ include "employee-api.frontend.principal" . | quote }}
+              {{- end }}
       to:
         - operation:
             methods: [GET, POST, PUT, DELETE, OPTIONS]
@@ -93,4 +99,38 @@ spec:
               - /healthz
               - /readyz
               - /startupz
+{{- if .Values.frontend.enabled }}
+---
+# 5. Allow the ingress gateway to reach the frontend, and the kubelet to probe
+#    it. The default-deny above covers the frontend too, so without this the
+#    UI is unreachable and its pods never become Ready.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: {{ $fullName }}-allow-frontend
+  namespace: {{ $ns }}
+  labels:
+    {{- include "employee-api.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "employee-api.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: frontend
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - {{ .Values.istio.authorizationPolicy.ingressGatewayPrincipal | quote }}
+      to:
+        - operation:
+            methods: [GET, HEAD, POST, PUT, DELETE, OPTIONS]
+    # Kubelet probes arrive from the node, outside the mesh, with no peer
+    # identity — they cannot be narrowed by principal.
+    - to:
+        - operation:
+            methods: [GET]
+            paths:
+              - /nginx-health
+{{- end }}
 {{- end }}

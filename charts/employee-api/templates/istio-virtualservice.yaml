@@ -53,4 +53,25 @@ spec:
             # them even if a future handler forgets.
             X-Content-Type-Options: nosniff
             X-Frame-Options: DENY
+    {{- if .Values.frontend.enabled }}
+    # Order matters. Istio evaluates http[] top down and takes the first match,
+    # so the API prefixes above win and this catch-all picks up everything
+    # else — "/", "/app.css", "/app.js" — and serves it from the frontend.
+    # Same origin as the API, so the browser never needs CORS.
+    - name: frontend
+      match:
+        - uri:
+            prefix: /
+      route:
+        - destination:
+            host: {{ include "employee-api.frontend.fullname" . }}.{{ include "employee-api.namespace" . }}.svc.cluster.local
+            port:
+              number: {{ .Values.frontend.service.port }}
+      timeout: 10s
+      headers:
+        response:
+          set:
+            X-Content-Type-Options: nosniff
+            X-Frame-Options: DENY
+    {{- end }}
 {{- end }}

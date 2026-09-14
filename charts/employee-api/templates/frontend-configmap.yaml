@@ -9,22 +9,35 @@ metadata:
     app.kubernetes.io/component: frontend
 data:
   # Mounted over /etc/nginx/conf.d. Rendered here rather than baked into the
-  # image because the API Service name depends on the Helm release name.
+  # image because the API's Service name depends on the Helm release name.
   default.conf: |
+    # Cache-Control is decided here rather than with `add_header` inside each
+    # location, because nginx's add_header does NOT merge: a single add_header
+    # in a location block discards every add_header inherited from the server
+    # block. Setting one Cache-Control per URI through a map keeps all the
+    # security headers below in one place, declared exactly once.
+    map $uri $ui_cache_control {
+        default                  "public, max-age=300";
+        /                        "no-cache";
+        /index.html              "no-cache";
+        ~^/(api|healthz|readyz)  "no-store";
+    }
+
     server {
         # 8080, not 80: binding a privileged port would need NET_BIND_SERVICE,
-        # which the "restricted" Pod Security profile does not allow.
+        # which the "restricted" Pod Security profile forbids.
         listen {{ .Values.frontend.containerPort }};
         server_name _;
 
         root /usr/share/nginx/html;
         index index.html;
 
-        # Deliberately no Strict-Transport-Security and no
-        # upgrade-insecure-requests. On a plain-http endpoint the latter
-        # rewrites this page's own /app.css and /app.js to https and they fail
-        # with ERR_SSL_PROTOCOL_ERROR, leaving the UI unstyled and inert. Set
-        # frontend.publicTls=true once TLS actually terminates in front.
+        # Every add_header for this server lives here, and nowhere else.
+        #
+        # Deliberately no upgrade-insecure-requests: on a plain-http endpoint
+        # it rewrites this page's own /app.css and /app.js to https and they
+        # fail with ERR_SSL_PROTOCOL_ERROR, leaving the UI unstyled and inert.
+        add_header Cache-Control $ui_cache_control always;
         add_header X-Content-Type-Options nosniff always;
         add_header X-Frame-Options DENY always;
         add_header Referrer-Policy no-referrer always;
@@ -34,22 +47,13 @@ data:
         {{- end }}
 
         # Liveness/readiness target. Served by nginx itself so the probe never
-        # depends on the API being up — a failing API must not restart the UI.
+        # depends on the API — a database outage must not restart the UI.
+        # `default_type`, not `add_header Content-Type`, so the headers above
+        # are still inherited here.
         location = /nginx-health {
             access_log off;
-            add_header Content-Type text/plain always;
+            default_type text/plain;
             return 200 "ok\n";
-        }
-
-        # The HTML shell must not be cached, or a rollout leaves stale markup
-        # pointing at assets that changed underneath it. Fingerprinted assets
-        # would be cacheable; these are not fingerprinted, so keep it short.
-        location = / {
-            add_header Cache-Control "no-cache" always;
-            try_files /index.html =404;
-        }
-        location = /index.html {
-            add_header Cache-Control "no-cache" always;
         }
 
         location / {
@@ -59,13 +63,18 @@ data:
         {{- if .Values.frontend.proxyApi }}
         # Proxy the API so the UI also works when reached directly, e.g.
         #   kubectl port-forward svc/{{ include "employee-api.frontend.fullname" . }} 8080:80
-        # Through the Istio gateway this block is not used: the VirtualService
+        # Through the Istio gateway this block is unused: the VirtualService
         # sends /api, /healthz and /readyz straight to the API Service, one hop
-        # fewer. Same-origin either way, so the browser never needs CORS.
+        # fewer. Same origin either way, so the browser never needs CORS.
         location ~ ^/(api|healthz|readyz)(/|$) {
             proxy_pass http://{{ include "employee-api.fullname" . }}.{{ include "employee-api.namespace" . }}.svc.cluster.local:{{ .Values.service.port }};
             proxy_http_version 1.1;
-            proxy_set_header Host              $host;
+            # The upstream's own name, NOT $host. Istio's sidecar routes
+            # outbound HTTP by Host header, not by destination IP: passing the
+            # original "employee-api-frontend" through makes Envoy route the
+            # request straight back here, looping until X-Forwarded-For grows
+            # past nginx's proxy buffer and the whole thing 502s.
+            proxy_set_header Host              {{ include "employee-api.fullname" . }}.{{ include "employee-api.namespace" . }}.svc.cluster.local;
             proxy_set_header X-Real-IP         $remote_addr;
             proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
             proxy_set_header X-Forwarded-Proto $scheme;

@@ -71,6 +71,62 @@ image:
   pullSecretName: ""
 
 # -----------------------------------------------------------------------------
+# Frontend (Employee Directory UI)
+# -----------------------------------------------------------------------------
+# A separate Deployment and Service from the API, deliberately:
+#   - the two scale independently; static files are cheap, the API is not
+#   - a UI rollout cannot restart the API, and vice versa
+#   - the API stays a pure JSON service with a `default-src 'none'` CSP
+#   - nginx serves static bytes better than Express does
+#
+# Its nginx config is rendered into a ConfigMap by the chart, because the API's
+# Service name depends on the release name.
+frontend:
+  enabled: true
+
+  image:
+    registry: docker.io
+    repository: YOUR_DOCKERHUB_USERNAME/employee-frontend
+    # Defaults to the chart's appVersion when empty.
+    tag: ""
+    pullPolicy: IfNotPresent
+
+  replicaCount: 2
+
+  # 8080, not 80. Binding a privileged port needs NET_BIND_SERVICE, which the
+  # "restricted" Pod Security profile forbids. The nginx-unprivileged base
+  # image listens here by default.
+  containerPort: 8080
+
+  # uid/gid of the `nginx` user in the nginx-unprivileged image.
+  runAsUser: 101
+
+  service:
+    type: ClusterIP
+    port: 80
+    annotations: {}
+
+  # Proxy /api, /healthz and /readyz through to the API Service, so the UI
+  # also works when reached directly (kubectl port-forward) rather than only
+  # through the Istio gateway. Through the gateway these paths are routed
+  # straight to the API and this block is unused.
+  proxyApi: true
+
+  # Emit Strict-Transport-Security. Turn on ONLY when TLS terminates in front
+  # of the gateway, i.e. alongside istio.gateway.tls.enabled.
+  publicTls: false
+
+  podAntiAffinity:
+    enabled: true
+
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      memory: 128Mi
+
+# -----------------------------------------------------------------------------
 # Deployment
 # -----------------------------------------------------------------------------
 replicaCount: 2
@@ -234,7 +290,8 @@ istio:
       httpsRedirect: false
 
   virtualService:
-    # Route prefixes forwarded to the service.
+    # Route prefixes forwarded to the API service. Everything not matched here
+    # falls through to the frontend route, which serves the UI from "/".
     prefixes:
       - /api
       - /healthz
