@@ -57,7 +57,12 @@ curl -X POST http://127.0.0.1:3080/api/v1/employees \
 ### 2. Deploy to Kubernetes
 
 ```bash
-# Istio must be installed first — see docs/DEPLOY.md
+# 1. Istio first — the chart needs its CRDs
+./scripts/install-istio.sh
+
+# 2. Then the app.
+#    --namespace, NOT --create-namespace: the chart renders its own Namespace
+#    so it can apply the istio-injection and PodSecurity labels.
 helm upgrade --install employee-api ./charts/employee-api \
   --namespace employee-app \
   --set image.repository=YOUR_DOCKERHUB_USERNAME/employee-api \
@@ -68,6 +73,9 @@ helm upgrade --install employee-api ./charts/employee-api \
 
 helm test employee-api -n employee-app
 ```
+
+Don't want the mesh? `--set istio.enabled=false` and reach the API with
+`kubectl port-forward`.
 
 Full walkthrough, including installing Istio and getting a cluster:
 **[docs/DEPLOY.md](docs/DEPLOY.md)**.
