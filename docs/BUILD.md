@@ -60,8 +60,8 @@ Two stages:
    the lockfile so the build is reproducible. `--ignore-scripts` blocks
    dependency install hooks, a well-worn supply-chain attack path.
 2. **`runtime`** — copies `node_modules` and the source into a clean
-   `node:22-alpine`, adds `dumb-init`, and drops to the unprivileged `node`
-   user (uid 1000).
+   `node:22-alpine`, applies OS patches, adds `dumb-init`, removes npm, and
+   drops to uid 1000.
 
 Decisions worth knowing about:
 
@@ -70,12 +70,38 @@ Decisions worth knowing about:
 | Copy `package.json` before the source | Dependency layer stays cached, so a code change rebuilds in seconds |
 | `npm ci --omit=dev` | No compilers, linters or test frameworks in the shipped image |
 | `dumb-init` as PID 1 | Node as PID 1 has no default `SIGTERM` handler, so graceful shutdown would never run and every pod termination would be a hard kill after the grace period |
-| `USER node` | Non-root, and the Pod `securityContext` enforces it again with `runAsNonRoot: true` |
 | `NODE_OPTIONS=--max-old-space-size=384` | Keeps the V8 heap inside the container memory limit so the kernel OOM killer does not take the process out without an error you can read |
 | No `apk` packages beyond `dumb-init` | Every added package is more CVE surface to triage |
+| `apk upgrade` | Picks up OS patches released after the base image was tagged. Without it the image inherits whatever `libssl`/`libcrypto` the base shipped with, which is how an image that installs almost nothing still reports HIGH findings |
+| **npm and corepack deleted** | The runtime entrypoint is `node src/server.js`; npm is never invoked after the build. Its ~600 bundled dependencies accounted for *every* Node-level CVE this image reported. Removing it also takes a package manager away from anyone who gets code execution in the container |
+| `USER 1000:1000`, not `USER node` | With `runAsNonRoot: true` the kubelet cannot verify a *named* user is non-root and refuses to start the container unless `runAsUser` is also set. A numeric UID removes that dependency |
 
 The `HEALTHCHECK` is informational — Kubernetes ignores it and uses the probes
-defined in the Helm chart.
+defined in the Helm chart. It is written in JSON exec form; the shell form wraps
+every check in `/bin/sh -c` and is flagged by hadolint DL3025.
+
+### Vulnerability posture
+
+Measured on the built image with Trivy 0.70:
+
+| | HIGH/CRITICAL (fixable) |
+|---|---|
+| Before `apk upgrade` + npm removal | **13** — 2 OS (`libssl3`, `libcrypto3`), 11 from npm's bundled dependencies |
+| After | **0** |
+
+None of the 11 Node findings were in this application's dependencies; every one
+sat under `/usr/local/lib/node_modules/npm/`. Verify the attribution yourself
+with:
+
+```bash
+trivy image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed \
+  --format json employee-api:scan \
+  | jq -r '.Results[].Vulnerabilities[]? | "\(.PkgPath // "os") \(.PkgName)"'
+```
+
+A finding under `app/node_modules/` *is* yours and needs the dependency
+updating. One under `usr/local/lib/node_modules/npm/` is not — and should no
+longer appear at all.
 
 ---
 

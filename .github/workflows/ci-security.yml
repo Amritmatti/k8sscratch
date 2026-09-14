@@ -226,13 +226,17 @@ jobs:
 
       - name: Trivy config scan (Kubernetes misconfiguration)
         uses: aquasecurity/trivy-action@v0.36.0
+        env:
+          TRIVY_SKIP_VERSION_CHECK: 'true'
         with:
           scan-type: config
           scan-ref: rendered/
           format: sarif
           output: trivy-config.sarif
-          severity: HIGH,CRITICAL
-          exit-code: '0'   # report, do not block
+          # `severity` is ignored for sarif output (see the image-scan job), so
+          # this reports every level. Fine here: the step never blocks, it only
+          # populates the Security tab.
+          exit-code: '0'
 
       - name: Upload results
         if: always()

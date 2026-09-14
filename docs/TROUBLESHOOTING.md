@@ -325,13 +325,54 @@ cd app && npm install && git add package-lock.json
 
 ### Trivy fails the build
 
+Reproduce exactly what CI gates on:
+
 ```bash
-trivy image --severity HIGH,CRITICAL --ignore-unfixed youruser/employee-api:tag
+docker build -t employee-api:scan ./app
+trivy image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed   --exit-code 1 employee-api:scan
 ```
 
-Usually a base image CVE — rebuild to pick up a newer `node:22-alpine`. If there
-is genuinely no fix available, `--ignore-unfixed` already excludes it; if it is
-fixed upstream, update the dependency.
+Then find out *where* the finding lives, which decides the fix:
+
+```bash
+trivy image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed   --format json employee-api:scan   | jq -r '.Results[].Vulnerabilities[]? | "\(.PkgPath // "os") \(.PkgName) \(.VulnerabilityID)"'
+```
+
+| `PkgPath` | Meaning | Fix |
+|---|---|---|
+| `(os)` / empty | Alpine package | `apk upgrade` in the Dockerfile — already done |
+| `usr/local/lib/node_modules/npm/...` | npm's own bundled deps | Not your code. npm is deleted from the runtime image — if these reappear, that step was removed |
+| `app/node_modules/...` | **Your** dependency | Update it: `npm update <pkg>` or bump it in `package.json` |
+
+### Trivy fails but the log shows no findings
+
+The log ends with `Error: Process completed with exit code 1` after
+`Building SARIF report with all severities`, and nothing about what was found.
+
+This is a trivy-action behaviour, not a scan result: when `format: sarif` is
+set, the action **drops** the `severity` and `ignore-unfixed` inputs and builds
+the report at every severity. Pairing that with `exit-code: '1'` fails the job
+on any LOW or MEDIUM finding, and because the report is written to a file
+rather than stdout the log cannot tell you which.
+
+The workflow therefore uses two steps: one produces the SARIF for the Security
+tab with `exit-code: '0'`, the other gates with `format: table`,
+`severity: HIGH,CRITICAL`, `ignore-unfixed: true` and `exit-code: '1'` so a
+failure prints the offending packages. Do not merge them back into one step.
+
+### Hadolint fails the build
+
+```bash
+docker run --rm -i hadolint/hadolint:latest-alpine   hadolint --failure-threshold warning - < app/Dockerfile
+```
+
+`info` findings do not fail; `warning` and above do. Two that were hit here:
+
+- **DL3025** — `CMD`/`HEALTHCHECK` in shell form. Use JSON exec form.
+- **DL3066** — non-numeric user id. `USER 1000:1000`, not `USER node`. This one
+  matters beyond the linter: with `runAsNonRoot: true` the kubelet cannot verify
+  a *named* user is non-root and refuses to start the container unless
+  `runAsUser` is also set.
 
 ### Gitleaks finds a secret
 
