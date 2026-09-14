@@ -223,6 +223,45 @@ Deploy without Istio first. It removes four moving parts (CRDs, sidecar
 injection, the gateway, mTLS) so that if something breaks here it is the
 application, not the mesh.
 
+### 4.0 Start from a clean database, or reuse the old password
+
+`helm uninstall` **keeps** the namespace and the PersistentVolumeClaim on
+purpose, so a teardown cannot take the database with it. That is the right
+default — and a trap when you redeploy with a freshly generated password.
+
+`POSTGRES_PASSWORD` is only read by `initdb`, which runs **only when the data
+directory is empty**. A retained PVC already has one, so Postgres starts with
+the *old* `employee_app` password while the API connects with the new one:
+
+```
+password authentication failed for user "employee_app"
+```
+
+and the migration initContainer sits in `Init:CrashLoopBackOff`.
+
+Check whether a volume survived:
+
+```bash
+kubectl get pvc -n employee-dev
+```
+
+If it lists `data-employee-api-postgresql-0`, pick one:
+
+```bash
+# A. Clean slate — deletes the namespace, the PVC and all the data.
+kubectl delete namespace employee-dev
+
+# B. Keep the data — reuse the password the database was created with,
+#    instead of generating a new one in 4.2.
+kubectl get secret employee-api-secrets -n employee-dev \
+  -o jsonpath='{.data.DB_PASSWORD}' | base64 -d
+```
+
+Option B only works while the old Secret still exists; `helm uninstall`
+removes it, so in practice a torn-down release means option A.
+
+---
+
 ### 4.1 Create the namespace — before Helm, not with it
 
 Helm 3.19 writes its release Secret *into* the target namespace, so the
@@ -618,6 +657,7 @@ Left alone deliberately:
 | UI missing CSP / `X-Frame-Options` | an `add_header` in a `location` discarded the server-level ones | Declare all `add_header` once at server level |
 | `502 upstream sent too big header` from nginx | `Host $host` made Istio loop the request back | Set Host to the API's service name |
 | Image reverts to `:1.0.0` after an upgrade | `--reuse-values` re-applied the overlay's `image.tag: ""` | Pass `--set image.tag=` explicitly every time |
+| `password authentication failed for user "employee_app"` after a redeploy | A retained PVC kept the old password; `initdb` only runs on an empty data dir | Delete the namespace, or reuse the old password (4.0) |
 
 Useful:
 
@@ -640,3 +680,9 @@ kubectl delete namespace employee-dev          # also deletes the PVC and its da
 
 The namespace carries `helm.sh/resource-policy: keep`, so `helm uninstall`
 alone leaves it — and the database — in place.
+
+> **Before redeploying after an uninstall**, remember that the retained volume
+> still holds the *old* database password. `POSTGRES_PASSWORD` is only applied
+> by `initdb` on an empty data directory, so a new password will not take and
+> the API fails with `password authentication failed for user "employee_app"`.
+> See [4.0](#40-start-from-a-clean-database-or-reuse-the-old-password).
