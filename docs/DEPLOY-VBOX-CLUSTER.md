@@ -156,7 +156,9 @@ one of these.
 
 ```bash
 cd /d/k8sscratch
-docker build -t employee-api:dev ./app
+# --provenance/--sbom off: buildx otherwise emits an image index with an
+# "unknown/unknown" attestation entry that containerd can refuse to unpack.
+docker build --provenance=false --sbom=false -t employee-api:dev ./app
 docker save employee-api:dev -o /tmp/employee-api-dev.tar
 
 for ip in 192.168.1.183 192.168.1.184 192.168.1.185; do
@@ -227,10 +229,24 @@ helm upgrade --install employee-api ./charts/employee-api \
   --wait --timeout 10m
 ```
 
-> **Never pass `--create-namespace`.** The chart renders its own `Namespace` so
-> it can apply the `istio-injection` and Pod Security labels. Helm creating it
-> first strips those labels and the install fails with
-> `invalid ownership metadata`.
+> **The namespace is a chicken-and-egg.** Helm 3.19 writes its release Secret
+> *into* the target namespace, so the namespace must exist before the install —
+> but the chart also renders its own `Namespace` so it can apply the
+> `istio-injection` and Pod Security labels. Passing neither fails with
+> `create: failed to create: namespaces "employee-dev" not found`; passing
+> `--create-namespace` fails with `invalid ownership metadata`.
+>
+> Create it first *with Helm's ownership metadata* so the chart adopts it and
+> still applies its labels:
+>
+> ```bash
+> kubectl create namespace employee-dev
+> kubectl label namespace employee-dev app.kubernetes.io/managed-by=Helm --overwrite
+> kubectl annotate namespace employee-dev >   meta.helm.sh/release-name=employee-api >   meta.helm.sh/release-namespace=employee-dev --overwrite
+> ```
+>
+> Verified: after this the namespace carries `istio-injection=enabled` and
+> `pod-security.kubernetes.io/enforce=restricted` from the chart.
 
 Watch it come up in another terminal:
 
@@ -287,6 +303,19 @@ cd /d/k8sscratch
 Installs `istio-base`, `istiod` and `istio-ingressgateway` via Helm, in that
 order.
 
+> **Expect the last step to fail with `context deadline exceeded`.** The
+> gateway chart creates a `Service` of type `LoadBalancer`, and Helm's `--wait`
+> blocks until it gets an external IP — which bare metal never provides. The
+> pods come up fine; only the release record is marked `failed`. Reconcile it
+> by declaring the type it should have had:
+>
+> ```bash
+> helm upgrade istio-ingressgateway istio/gateway -n istio-system >   --version 1.30.4 --set service.type=NodePort --wait --timeout 5m
+> ```
+>
+> That both fixes the release and makes NodePort stick across future upgrades,
+> so step 5.3 below is no longer needed as a separate patch.
+
 ### 5.2 Install the CNI node agent — required here
 
 Without it, every injected pod is rejected: `istio-init` runs as root with
@@ -295,11 +324,25 @@ agent does the same network setup from the node, so no init container is
 injected at all.
 
 ```bash
-helm install istio-cni istio/cni -n istio-system --wait
+helm upgrade --install istio-cni istio/cni -n istio-system --version 1.30.4 --wait
+
+# NOT OPTIONAL: installing the chart does not tell istiod to stop injecting
+# istio-init. Without this the PodSecurity rejection below continues.
+helm upgrade istiod istio/istiod -n istio-system --version 1.30.4   --set cni.enabled=true --wait --timeout 5m
+
 kubectl -n istio-system get pods
 ```
 
-Skipping this produces:
+Confirm the injection changed shape — `istio-init` should be gone, replaced by
+`istio-validation` plus an `istio-proxy` init container:
+
+```bash
+kubectl rollout restart deployment/employee-api -n employee-dev
+kubectl get pod -n employee-dev -l app.kubernetes.io/component=api   -o jsonpath='{.items[0].spec.initContainers[*].name}'
+# migrate istio-validation istio-proxy
+```
+
+Skipping the istiod flag produces:
 
 ```
 Error creating: pods "employee-api-..." is forbidden: violates PodSecurity
@@ -334,7 +377,15 @@ kubectl delete pod -n employee-dev --all     # force re-injection
 kubectl get pods -n employee-dev             # expect 2/2
 ```
 
-`--reuse-values` keeps the passwords and image settings from Phase 4.
+> **Do not rely on `--reuse-values` here.** Combined with
+> `-f values-dev.yaml`, that overlay's own `image.tag: ""` is re-applied on top
+> of the `dev` tag you set at install time, silently reverting the image to
+> `employee-api:1.0.0` and landing you in `ImagePullBackOff`. Pass the image
+> and secret values explicitly on every upgrade instead:
+>
+> ```bash
+>   --set image.registry="" --set image.repository=employee-api --set image.tag=dev >   --set secrets.dbPassword="$DB_PASSWORD" --set secrets.postgresPassword="$DB_PASSWORD"
+> ```
 
 The dev overlay leaves `istio.authorizationPolicy.enabled: false` on purpose —
 the policy denies everything that is not the ingress gateway, which makes
@@ -353,6 +404,35 @@ curl -s "$BASE/api/v1/employees?limit=10"
 ```
 
 Any node IP works — kube-proxy forwards the NodePort from all of them.
+
+---
+
+## The browser UI
+
+The API container also serves a small employee directory (list, create, edit,
+delete, search) from `/app/public`, at `/` on the same port. It is plain
+HTML/CSS/JS with no build step and no external requests, so it runs under a
+`'self'`-only Content-Security-Policy.
+
+| Piece | Where |
+|---|---|
+| Markup, styles, script | `app/public/` |
+| Static mount + CSP | `app/src/app.js` |
+| On/off switch | `config.uiEnabled` → `UI_ENABLED` |
+| Gateway route | `istio.virtualService.prefixes` includes `/` |
+
+Reach it at `http://<any-node-ip>:<gateway-nodePort>/`.
+
+> **`config.publicTls` must match reality.** helmet emits
+> `upgrade-insecure-requests` and HSTS. On a plain-http endpoint that directive
+> rewrites the page's own `/app.css` and `/app.js` to `https://`, and they fail
+> with `ERR_SSL_PROTOCOL_ERROR` — the page loads unstyled and does nothing.
+> `publicTls` is `"false"` by default and `"true"` in `values-prod.yaml`, where
+> the gateway terminates TLS. `NODE_ENV` cannot stand in for this: the dev
+> overlay runs `NODE_ENV=production` over plain http on purpose.
+
+Set `config.uiEnabled: "false"` for a pure JSON API; the CSP tightens back to
+`default-src 'none'` and nothing is served at `/`.
 
 ---
 
@@ -378,6 +458,7 @@ Everything else in `values.yaml` works as shipped.
 | `secrets.dbPassword` | `ChangeMe-Dev-Only-8chars` | generated | Committed default |
 | `secrets.postgresPassword` | `ChangeMe-Dev-Only-8chars` | generated, same value | Must match `dbPassword` — the bundled Postgres creates the app user from it |
 | `istio.enabled` | `true` | `false` for Phase 4, `true` after Phase 5 | Preflight fails without the CRDs |
+| `config.publicTls` | `"false"` | `"true"` only when TLS terminates in front | `"true"` over plain http breaks the UI's own assets |
 
 Left alone deliberately:
 
@@ -388,6 +469,7 @@ Left alone deliberately:
 | `networkPolicy.enabled` | `true` | Calico enforces these, so they are real here — unlike on kind |
 | `metrics.serviceMonitor.enabled` | `false` | No Prometheus Operator |
 | `autoscaling.enabled` | `false` (dev) | No metrics-server |
+| `config.uiEnabled` | `"true"` | Serves the browser directory at `/` |
 
 ---
 
@@ -406,6 +488,11 @@ Left alone deliberately:
 | Pods `1/1` after enabling Istio | Sidecar not injected into already-running pods | `kubectl delete pod -n employee-dev --all` |
 | `invalid ownership metadata` | `--create-namespace` was passed | `kubectl delete ns employee-dev` and reinstall without it |
 | App code changes not showing | `IfNotPresent` + reused tag | New tag, re-import, `--set image.tag=<new>` |
+| `namespaces "employee-dev" not found` on install | Helm writes its release Secret into the namespace | Pre-create it with Helm ownership metadata (Phase 4) |
+| Gateway install ends `context deadline exceeded` | `--wait` waiting on a LoadBalancer IP | Reconcile with `--set service.type=NodePort` (5.1) |
+| Still `violates PodSecurity` after installing istio-cni | istiod was never told to use it | `helm upgrade istiod ... --set cni.enabled=true` (5.2) |
+| UI loads unstyled, `ERR_SSL_PROTOCOL_ERROR` on `/app.css` | `upgrade-insecure-requests` over plain http | `config.publicTls: "false"` |
+| Image reverts to `:1.0.0` after an upgrade | `--reuse-values` re-applied the overlay's `image.tag: ""` | Pass `--set image.tag=` explicitly every time |
 
 Useful:
 

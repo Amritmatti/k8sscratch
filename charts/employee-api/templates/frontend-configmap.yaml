@@ -1,0 +1,77 @@
+{{- if .Values.frontend.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "employee-api.frontend.fullname" . }}-nginx
+  namespace: {{ include "employee-api.namespace" . }}
+  labels:
+    {{- include "employee-api.labels" . | nindent 4 }}
+    app.kubernetes.io/component: frontend
+data:
+  # Mounted over /etc/nginx/conf.d. Rendered here rather than baked into the
+  # image because the API Service name depends on the Helm release name.
+  default.conf: |
+    server {
+        # 8080, not 80: binding a privileged port would need NET_BIND_SERVICE,
+        # which the "restricted" Pod Security profile does not allow.
+        listen {{ .Values.frontend.containerPort }};
+        server_name _;
+
+        root /usr/share/nginx/html;
+        index index.html;
+
+        # Deliberately no Strict-Transport-Security and no
+        # upgrade-insecure-requests. On a plain-http endpoint the latter
+        # rewrites this page's own /app.css and /app.js to https and they fail
+        # with ERR_SSL_PROTOCOL_ERROR, leaving the UI unstyled and inert. Set
+        # frontend.publicTls=true once TLS actually terminates in front.
+        add_header X-Content-Type-Options nosniff always;
+        add_header X-Frame-Options DENY always;
+        add_header Referrer-Policy no-referrer always;
+        add_header Content-Security-Policy "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'" always;
+        {{- if .Values.frontend.publicTls }}
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+        {{- end }}
+
+        # Liveness/readiness target. Served by nginx itself so the probe never
+        # depends on the API being up — a failing API must not restart the UI.
+        location = /nginx-health {
+            access_log off;
+            add_header Content-Type text/plain always;
+            return 200 "ok\n";
+        }
+
+        # The HTML shell must not be cached, or a rollout leaves stale markup
+        # pointing at assets that changed underneath it. Fingerprinted assets
+        # would be cacheable; these are not fingerprinted, so keep it short.
+        location = / {
+            add_header Cache-Control "no-cache" always;
+            try_files /index.html =404;
+        }
+        location = /index.html {
+            add_header Cache-Control "no-cache" always;
+        }
+
+        location / {
+            try_files $uri $uri/ =404;
+        }
+
+        {{- if .Values.frontend.proxyApi }}
+        # Proxy the API so the UI also works when reached directly, e.g.
+        #   kubectl port-forward svc/{{ include "employee-api.frontend.fullname" . }} 8080:80
+        # Through the Istio gateway this block is not used: the VirtualService
+        # sends /api, /healthz and /readyz straight to the API Service, one hop
+        # fewer. Same-origin either way, so the browser never needs CORS.
+        location ~ ^/(api|healthz|readyz)(/|$) {
+            proxy_pass http://{{ include "employee-api.fullname" . }}.{{ include "employee-api.namespace" . }}.svc.cluster.local:{{ .Values.service.port }};
+            proxy_http_version 1.1;
+            proxy_set_header Host              $host;
+            proxy_set_header X-Real-IP         $remote_addr;
+            proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_connect_timeout 5s;
+            proxy_read_timeout    30s;
+        }
+        {{- end }}
+    }
+{{- end }}

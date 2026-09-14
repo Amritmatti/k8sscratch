@@ -71,6 +71,37 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 {{- end }}
 
+{{/* ---------------------------------------------------------------- frontend */}}
+
+{{- define "employee-api.frontend.fullname" -}}
+{{- printf "%s-frontend" (include "employee-api.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{- define "employee-api.frontend.image" -}}
+{{- $tag := default .Chart.AppVersion .Values.frontend.image.tag }}
+{{- if .Values.frontend.image.registry }}
+{{- printf "%s/%s:%s" .Values.frontend.image.registry .Values.frontend.image.repository $tag }}
+{{- else }}
+{{- printf "%s:%s" .Values.frontend.image.repository $tag }}
+{{- end }}
+{{- end }}
+
+{{- define "employee-api.frontend.serviceAccountName" -}}
+{{- if .Values.serviceAccount.create }}
+{{- printf "%s-frontend" (include "employee-api.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- else }}
+{{- default "default" .Values.serviceAccount.name }}
+{{- end }}
+{{- end }}
+
+{{/*
+The frontend's SPIFFE identity, used by the API's AuthorizationPolicy to let
+the UI's nginx call the API without opening it to the whole namespace.
+*/}}
+{{- define "employee-api.frontend.principal" -}}
+{{- printf "cluster.local/ns/%s/sa/%s" (include "employee-api.namespace" .) (include "employee-api.frontend.serviceAccountName" .) }}
+{{- end }}
+
 {{- define "employee-api.postgresql.fullname" -}}
 {{- printf "%s-postgresql" (include "employee-api.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
