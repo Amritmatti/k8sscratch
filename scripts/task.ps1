@@ -83,7 +83,7 @@ function Get-ValuesArgs {
 
 function Task-Help {
     Write-Host ''
-    Write-Host 'Employee API — tasks' -ForegroundColor White
+    Write-Host 'Employee API - tasks' -ForegroundColor White
     Write-Host ''
     $tasks = [ordered]@{
         'install'          = 'Install Node dependencies'
