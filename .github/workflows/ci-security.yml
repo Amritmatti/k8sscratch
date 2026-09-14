@@ -1,0 +1,209 @@
+# DevSecOps pipeline — separate from the build workflow on purpose.
+#
+# The build workflow does one job (build and push) and stays fast. This one
+# does the checks, and can fail without blocking an image from being produced
+# for a branch you are debugging.
+#
+# Every scanner here runs against a real artefact: the source tree, the
+# dependency lockfile, the Dockerfile, the built image and the rendered
+# Kubernetes manifests.
+
+name: CI and Security
+
+on:
+  push:
+    branches: [main, master, develop]
+  pull_request:
+  schedule:
+    # Weekly: new CVEs are published against code that has not changed, so a
+    # scan on commit alone will miss them.
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  security-events: write   # upload SARIF to the Security tab
+  pull-requests: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  test:
+    name: Lint and test
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: employees
+          POSTGRES_USER: employee_app
+          POSTGRES_PASSWORD: ci-test-password
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U employee_app -d employees"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install dependencies
+        working-directory: app
+        run: npm ci
+
+      - name: Unit tests
+        working-directory: app
+        run: npm run test:unit
+
+      - name: Integration tests
+        working-directory: app
+        env:
+          DB_HOST: localhost
+          DB_PORT: '5432'
+          DB_NAME: employees
+          DB_USER: employee_app
+          DB_PASSWORD: ci-test-password
+          LOG_LEVEL: silent
+        run: npm run test:integration
+
+  # ---------------------------------------------------------------------------
+  dependencies:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: npm audit (high and critical)
+        working-directory: app
+        run: npm audit --audit-level=high
+
+  # ---------------------------------------------------------------------------
+  secrets-scan:
+    name: Secret scanning
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history: a credential committed and later removed is still in
+          # the history and still needs rotating.
+          fetch-depth: 0
+
+      - name: Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ---------------------------------------------------------------------------
+  dockerfile-lint:
+    name: Dockerfile lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Hadolint
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: app/Dockerfile
+          failure-threshold: warning
+
+  # ---------------------------------------------------------------------------
+  image-scan:
+    name: Image vulnerability scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image for scanning
+        run: docker build -t employee-api:scan ./app
+
+      - name: Trivy (fail on HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: employee-api:scan
+          format: sarif
+          output: trivy-image.sarif
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true      # do not block on CVEs with no patch yet
+          exit-code: '1'
+
+      - name: Upload results
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-image.sarif
+          category: trivy-image
+
+  # ---------------------------------------------------------------------------
+  helm-validate:
+    name: Helm lint and manifest scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+
+      - name: Helm lint (all value sets)
+        run: |
+          set -euo pipefail
+          for values in "" "-f charts/employee-api/values-dev.yaml" "-f charts/employee-api/values-prod.yaml"; do
+            echo "::group::helm lint ${values:-(defaults)}"
+            # shellcheck disable=SC2086
+            helm lint charts/employee-api $values
+            echo "::endgroup::"
+          done
+
+      - name: Render manifests
+        run: |
+          mkdir -p rendered
+          helm template employee-api charts/employee-api \
+            --namespace employee-app > rendered/default.yaml
+          helm template employee-api charts/employee-api \
+            -f charts/employee-api/values-prod.yaml \
+            --namespace employee-prod --set image.tag=ci > rendered/prod.yaml
+
+      - name: Validate against the Kubernetes API schema
+        run: |
+          curl -sSL -o kubeconform.tar.gz \
+            https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
+          tar xzf kubeconform.tar.gz kubeconform
+          # Istio and Prometheus CRDs are not in the upstream schema set, so
+          # pull their schemas from the community catalogue.
+          ./kubeconform -strict -summary -ignore-missing-schemas \
+            -schema-location default \
+            -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+            rendered/
+
+      - name: Trivy config scan (Kubernetes misconfiguration)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: config
+          scan-ref: rendered/
+          format: sarif
+          output: trivy-config.sarif
+          severity: HIGH,CRITICAL
+          exit-code: '0'   # report, do not block
+
+      - name: Upload results
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-config.sarif
+          category: trivy-config

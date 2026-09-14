@@ -1,0 +1,27 @@
+{{- if .Values.metrics.serviceMonitor.enabled }}
+# Requires the Prometheus Operator CRDs. Disabled by default so `helm install`
+# succeeds on a cluster that does not have them.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "employee-api.fullname" . }}
+  namespace: {{ include "employee-api.namespace" . }}
+  labels:
+    {{- include "employee-api.labels" . | nindent 4 }}
+    {{- with .Values.metrics.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "employee-api.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: api
+  namespaceSelector:
+    matchNames:
+      - {{ include "employee-api.namespace" . }}
+  endpoints:
+    - port: http-metrics
+      path: /metrics
+      interval: {{ .Values.metrics.serviceMonitor.interval }}
+      scrapeTimeout: {{ .Values.metrics.serviceMonitor.scrapeTimeout }}
+{{- end }}

@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "employee-api.configMapName" . }}
+  namespace: {{ include "employee-api.namespace" . }}
+  labels:
+    {{- include "employee-api.labels" . | nindent 4 }}
+data:
+  # Non-secret configuration. Credentials live in the Secret, never here.
+  LOG_LEVEL: {{ .Values.config.logLevel | quote }}
+  LOG_PRETTY: {{ .Values.config.logPretty | quote }}
+  RATE_LIMIT_ENABLED: {{ .Values.config.rateLimitEnabled | quote }}
+  RATE_LIMIT_WINDOW_MS: {{ .Values.config.rateLimitWindowMs | quote }}
+  RATE_LIMIT_MAX: {{ .Values.config.rateLimitMax | quote }}
+  METRICS_ENABLED: {{ .Values.config.metricsEnabled | quote }}
+  DB_POOL_MAX: {{ .Values.config.dbPoolMax | quote }}
+  DB_SSL: {{ .Values.config.dbSsl | quote }}
+  DB_CONNECTION_TIMEOUT_MS: {{ .Values.config.dbConnectionTimeoutMs | quote }}
+  DB_STATEMENT_TIMEOUT_MS: {{ .Values.config.dbStatementTimeoutMs | quote }}
+  SHUTDOWN_TIMEOUT_MS: {{ .Values.config.shutdownTimeoutMs | quote }}
+  PRE_STOP_DELAY_MS: {{ .Values.config.preStopDelayMs | quote }}

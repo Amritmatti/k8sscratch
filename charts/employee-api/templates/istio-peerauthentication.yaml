@@ -1,0 +1,16 @@
+{{- if and .Values.istio.enabled .Values.istio.peerAuthentication.enabled }}
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: {{ include "employee-api.fullname" . }}
+  namespace: {{ include "employee-api.namespace" . }}
+  labels:
+    {{- include "employee-api.labels" . | nindent 4 }}
+spec:
+  # Namespace-wide: no selector means every workload in this namespace.
+  mtls:
+    # STRICT refuses plaintext connections outright. PERMISSIVE (the Istio
+    # default) accepts both, which is useful while migrating but means an
+    # unencrypted path keeps working silently.
+    mode: {{ .Values.istio.peerAuthentication.mode }}
+{{- end }}

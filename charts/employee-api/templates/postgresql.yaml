@@ -1,0 +1,157 @@
+{{- if .Values.postgresql.enabled }}
+{{- $pgName := include "employee-api.postgresql.fullname" . -}}
+---
+# Headless Service: a StatefulSet needs one to give its pods stable DNS names.
+# The app connects through the regular Service below.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $pgName }}-headless
+  namespace: {{ include "employee-api.namespace" . }}
+  labels:
+    {{- include "employee-api.labels" . | nindent 4 }}
+    app.kubernetes.io/component: database
+spec:
+  clusterIP: None
+  ports:
+    - name: tcp-postgresql
+      port: {{ .Values.postgresql.service.port }}
+      targetPort: postgresql
+  selector:
+    {{- include "employee-api.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: database
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $pgName }}
+  namespace: {{ include "employee-api.namespace" . }}
+  labels:
+    {{- include "employee-api.labels" . | nindent 4 }}
+    app.kubernetes.io/component: database
+spec:
+  type: ClusterIP
+  ports:
+    # `tcp-` prefix: tells Istio this is opaque TCP, not HTTP. Naming it
+    # `http-` would make the sidecar try to parse the Postgres wire protocol
+    # as HTTP and drop the connection.
+    - name: tcp-postgresql
+      port: {{ .Values.postgresql.service.port }}
+      targetPort: postgresql
+      protocol: TCP
+  selector:
+    {{- include "employee-api.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: database
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $pgName }}
+  namespace: {{ include "employee-api.namespace" . }}
+  labels:
+    {{- include "employee-api.labels" . | nindent 4 }}
+    app.kubernetes.io/component: database
+spec:
+  serviceName: {{ $pgName }}-headless
+  # Single replica. This is NOT highly available: a node failure means downtime
+  # until the pod reschedules and reattaches its volume. For production use a
+  # managed database or an operator (CloudNativePG), and set
+  # postgresql.enabled=false.
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "employee-api.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: database
+  template:
+    metadata:
+      labels:
+        {{- include "employee-api.labels" . | nindent 8 }}
+        app.kubernetes.io/component: database
+      annotations:
+        sidecar.istio.io/inject: {{ .Values.postgresql.istioSidecarInject | quote }}
+    spec:
+      securityContext:
+        {{- toYaml .Values.postgresql.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: postgresql
+          image: {{ include "employee-api.postgresql.image" . }}
+          imagePullPolicy: {{ .Values.postgresql.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.postgresql.containerSecurityContext | nindent 12 }}
+          ports:
+            - name: postgresql
+              containerPort: 5432
+              protocol: TCP
+          env:
+            - name: POSTGRES_DB
+              value: {{ .Values.postgresql.auth.database | quote }}
+            - name: POSTGRES_USER
+              value: {{ .Values.postgresql.auth.username | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "employee-api.secretName" . }}
+                  key: DB_PASSWORD
+            # The image initialises into a subdirectory; pointing PGDATA at a
+            # subpath of the mount avoids the "directory not empty" failure
+            # caused by lost+found on some storage classes.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+            # scram-sha-256 rather than the older md5.
+            - name: POSTGRES_INITDB_ARGS
+              value: "--auth-host=scram-sha-256"
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", {{ .Values.postgresql.auth.username | quote }}, "-d", {{ .Values.postgresql.auth.database | quote }}]
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              # pg_isready returns success slightly before the database accepts
+              # queries, so actually run one.
+              command:
+                - sh
+                - -c
+                - exec pg_isready -U {{ .Values.postgresql.auth.username | quote }} -d {{ .Values.postgresql.auth.database | quote }} -h 127.0.0.1
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            {{- toYaml .Values.postgresql.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: tmp
+              mountPath: /tmp
+            - name: run
+              mountPath: /var/run/postgresql
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: run
+          emptyDir: {}
+        {{- if not .Values.postgresql.persistence.enabled }}
+        - name: data
+          emptyDir: {}
+        {{- end }}
+  {{- if .Values.postgresql.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "employee-api.labels" . | nindent 10 }}
+      spec:
+        accessModes:
+          - {{ .Values.postgresql.persistence.accessMode }}
+        resources:
+          requests:
+            storage: {{ .Values.postgresql.persistence.size }}
+        {{- with .Values.postgresql.persistence.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+  {{- end }}
+{{- end }}

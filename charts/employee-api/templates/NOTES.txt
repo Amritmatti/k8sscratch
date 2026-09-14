@@ -1,0 +1,90 @@
+
+{{ .Chart.Name }} {{ .Chart.Version }} deployed as release "{{ .Release.Name }}".
+
+  Namespace : {{ include "employee-api.namespace" . }}
+  Image     : {{ include "employee-api.image" . }}
+  Replicas  : {{ if .Values.autoscaling.enabled }}{{ .Values.autoscaling.minReplicas }}-{{ .Values.autoscaling.maxReplicas }} (HPA){{ else }}{{ .Values.replicaCount }}{{ end }}
+  Database  : {{ include "employee-api.dbHost" . }}:{{ include "employee-api.dbPort" . }}{{ if not .Values.postgresql.enabled }} (external){{ end }}
+
+1. Watch the rollout finish
+---------------------------
+   kubectl rollout status deployment/{{ include "employee-api.fullname" . }} \
+     -n {{ include "employee-api.namespace" . }} --timeout=300s
+
+   kubectl get pods -n {{ include "employee-api.namespace" . }} -w
+
+{{- if .Values.migrations.enabled }}
+
+   Schema migrations ran as a pre-upgrade hook. If the release failed, read
+   their output first — that is usually where the answer is:
+
+     kubectl logs -n {{ include "employee-api.namespace" . }} \
+       job/{{ include "employee-api.fullname" . }}-migrate-{{ .Release.Revision }}
+{{- end }}
+
+2. Reach the API
+----------------
+{{- if .Values.istio.enabled }}
+   Through the Istio ingress gateway:
+
+     export INGRESS_HOST=$(kubectl -n istio-system get svc istio-ingressgateway \
+       -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+     export INGRESS_PORT=$(kubectl -n istio-system get svc istio-ingressgateway \
+       -o jsonpath='{.spec.ports[?(@.name=="http2")].port}')
+
+   If the gateway has no external IP (kind, minikube, bare metal without a
+   load balancer), port-forward it instead:
+
+     kubectl -n istio-system port-forward svc/istio-ingressgateway 8080:80
+     export INGRESS_HOST=127.0.0.1 INGRESS_PORT=8080
+
+     curl -s http://$INGRESS_HOST:$INGRESS_PORT/api/v1/employees | jq
+{{- else }}
+   Istio is disabled, so port-forward the Service directly:
+
+     kubectl -n {{ include "employee-api.namespace" . }} \
+       port-forward svc/{{ include "employee-api.fullname" . }} 8080:{{ .Values.service.port }}
+
+     curl -s http://127.0.0.1:8080/api/v1/employees | jq
+{{- end }}
+
+3. Create an employee
+---------------------
+   curl -sS -X POST http://$INGRESS_HOST:$INGRESS_PORT/api/v1/employees \
+     -H 'Content-Type: application/json' \
+     -d '{"name":"Ada Lovelace","dob":"1990-12-10","designation":"Engineer","doj":"2015-06-01"}'
+
+4. Verify the deployment
+------------------------
+   helm test {{ .Release.Name }} -n {{ include "employee-api.namespace" . }}
+
+{{- if .Values.istio.enabled }}
+
+   Confirm mTLS is actually STRICT (not just configured):
+
+     istioctl x describe pod -n {{ include "employee-api.namespace" . }} \
+       $(kubectl get pod -n {{ include "employee-api.namespace" . }} \
+         -l app.kubernetes.io/component=api -o jsonpath='{.items[0].metadata.name}')
+{{- end }}
+
+{{- if not .Values.secrets.existingSecret }}
+
+WARNING — secrets
+-----------------
+This release created a Secret from values.yaml. That is fine for development,
+but the values file holds the database password in plain text. Before any real
+deployment either pass it at install time:
+
+  helm upgrade --install {{ .Release.Name }} ./charts/employee-api \
+    -n {{ include "employee-api.namespace" . }} \
+    --set secrets.dbPassword="$DB_PASSWORD"
+
+or point `secrets.existingSecret` at a Secret managed by External Secrets,
+Sealed Secrets or Vault. See docs/SECURITY.md.
+{{- end }}
+
+{{- if and .Values.postgresql.enabled (eq (int .Values.replicaCount) 1) }}
+
+NOTE: the bundled PostgreSQL is a single replica with no failover. Suitable for
+development and evaluation, not production. See docs/DEPLOYMENT.md.
+{{- end }}

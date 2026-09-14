@@ -1,0 +1,42 @@
+{{- if and .Values.istio.enabled .Values.istio.gateway.create }}
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: {{ include "employee-api.fullname" . }}
+  namespace: {{ include "employee-api.namespace" . }}
+  labels:
+    {{- include "employee-api.labels" . | nindent 4 }}
+spec:
+  # Binds to the shared ingress gateway deployment (usually in istio-system).
+  # The Gateway object lives here, but the Envoy it configures is that one.
+  selector:
+    {{- toYaml .Values.istio.gateway.selector | nindent 4 }}
+  servers:
+    {{- if .Values.istio.gateway.http.enabled }}
+    - port:
+        number: {{ .Values.istio.gateway.http.port }}
+        name: http
+        protocol: HTTP
+      hosts:
+        {{- toYaml .Values.istio.gateway.hosts | nindent 8 }}
+      {{- if and .Values.istio.gateway.tls.enabled .Values.istio.gateway.tls.httpsRedirect }}
+      tls:
+        # Answer plaintext with a 301 to HTTPS rather than serving it.
+        httpsRedirect: true
+      {{- end }}
+    {{- end }}
+    {{- if .Values.istio.gateway.tls.enabled }}
+    - port:
+        number: {{ .Values.istio.gateway.tls.port }}
+        name: https
+        protocol: HTTPS
+      hosts:
+        {{- toYaml .Values.istio.gateway.hosts | nindent 8 }}
+      tls:
+        mode: {{ .Values.istio.gateway.tls.mode }}
+        # The TLS Secret must exist in the namespace of the ingress gateway
+        # (istio-system by default), NOT in this namespace. This is the single
+        # most common reason a Gateway serves a 404 on HTTPS.
+        credentialName: {{ .Values.istio.gateway.tls.credentialName }}
+    {{- end }}
+{{- end }}

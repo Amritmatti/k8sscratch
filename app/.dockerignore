@@ -1,0 +1,20 @@
+# Keep the build context small and secrets out of the image.
+node_modules
+npm-debug.log*
+.env
+.env.*
+!.env.example
+coverage
+.nyc_output
+tests
+*.test.js
+.git
+.gitignore
+Dockerfile
+.dockerignore
+README.md
+docs
+*.md
+.vscode
+.idea
+.DS_Store

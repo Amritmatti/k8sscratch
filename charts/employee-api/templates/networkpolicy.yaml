@@ -1,0 +1,115 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $fullName := include "employee-api.fullname" . -}}
+{{- $ns := include "employee-api.namespace" . -}}
+---
+# Enforced by the CNI, independently of Istio. If a sidecar is missing,
+# misconfigured or bypassed, these rules still hold — which is the point of
+# having both.
+#
+# NOTE: NetworkPolicy requires a CNI that implements it (Calico, Cilium,
+# Antrea, Weave). On a CNI that does not, these objects are accepted by the
+# API server and silently do nothing. Verify before relying on them.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullName }}-api
+  namespace: {{ $ns }}
+  labels:
+    {{- include "employee-api.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "employee-api.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: api
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # From the Istio ingress gateway.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.ingressNamespace }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.service.targetPort }}
+    # From Prometheus, to the metrics port only.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.monitoringNamespace }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.service.metricsPort }}
+    # Kubelet probes come from the node itself, which has no namespace label,
+    # so this rule cannot be narrowed by namespaceSelector. Without it every
+    # probe fails and the pods never become Ready.
+    - ports:
+        - protocol: TCP
+          port: {{ .Values.service.targetPort }}
+  egress:
+    {{- if .Values.networkPolicy.allowDNS }}
+    # DNS, or the app cannot resolve the database Service name.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    {{- end }}
+    # To PostgreSQL, and nothing else. A compromised API pod cannot open
+    # connections to arbitrary destinations inside or outside the cluster.
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "employee-api.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: database
+      ports:
+        - protocol: TCP
+          port: {{ include "employee-api.dbPort" . }}
+    # To the Istio control plane, for certificates and configuration.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: istio-system
+      ports:
+        - protocol: TCP
+          port: 15012
+        - protocol: TCP
+          port: 15010
+{{- if .Values.postgresql.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullName }}-database
+  namespace: {{ $ns }}
+  labels:
+    {{- include "employee-api.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "employee-api.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: database
+  policyTypes:
+    - Ingress
+  ingress:
+    # Only the API pods and the migration Job may reach Postgres. Nothing else
+    # in the namespace, and nothing in any other namespace, can connect.
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "employee-api.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: api
+        - podSelector:
+            matchLabels:
+              {{- include "employee-api.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: migration
+      ports:
+        - protocol: TCP
+          port: 5432
+{{- end }}
+{{- end }}

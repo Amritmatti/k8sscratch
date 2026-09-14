@@ -1,0 +1,114 @@
+{{- if and .Values.migrations.enabled (eq .Values.migrations.strategy "hook") }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  # The name includes the revision so each upgrade creates a distinct Job and
+  # Helm is never asked to patch an immutable Job spec.
+  name: {{ include "employee-api.fullname" . }}-migrate-{{ .Release.Revision }}
+  namespace: {{ include "employee-api.namespace" . }}
+  labels:
+    {{- include "employee-api.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migration
+  annotations:
+    # post-install, NOT pre-install: Helm runs pre-install hooks before the
+    # PostgreSQL StatefulSet is created, so a pre-install Job would wait for a
+    # database that does not exist yet and time out.
+    #
+    # On upgrade, pre-upgrade is correct and runs before the new pods roll out.
+    "helm.sh/hook": post-install,pre-upgrade
+    "helm.sh/hook-weight": "5"
+    "helm.sh/hook-delete-policy": {{ .Values.migrations.hookDeletePolicy }}
+spec:
+  backoffLimit: {{ .Values.migrations.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.migrations.activeDeadlineSeconds }}
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        {{- include "employee-api.labels" . | nindent 8 }}
+        app.kubernetes.io/component: migration
+      annotations:
+        # No sidecar: an Istio proxy keeps running after the main container
+        # exits, so the pod never completes and the hook times out. Migrations
+        # talk only to Postgres, which the NetworkPolicy already covers.
+        sidecar.istio.io/inject: "false"
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "employee-api.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      {{- with .Values.image.pullSecretName }}
+      imagePullSecrets:
+        - name: {{ . }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+
+      {{- if .Values.postgresql.enabled }}
+      initContainers:
+        # On a fresh install the database is still initialising. Waiting here
+        # keeps the failure legible: a timeout on "waiting for postgres" rather
+        # than a connection error buried in the migration output.
+        - name: wait-for-postgres
+          image: {{ include "employee-api.postgresql.image" . }}
+          imagePullPolicy: {{ .Values.postgresql.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              echo "Waiting for PostgreSQL at $DB_HOST:$DB_PORT ..."
+              for i in $(seq 1 60); do
+                if pg_isready -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -q; then
+                  echo "PostgreSQL is accepting connections."
+                  exit 0
+                fi
+                echo "  attempt $i/60 ..."
+                sleep 2
+              done
+              echo "Timed out after 120s waiting for PostgreSQL." >&2
+              exit 1
+          env:
+            - name: DB_HOST
+              value: {{ include "employee-api.dbHost" . | quote }}
+            - name: DB_PORT
+              value: {{ include "employee-api.dbPort" . | quote }}
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "employee-api.secretName" . }}
+                  key: DB_USER
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 64Mi
+      {{- end }}
+
+      containers:
+        - name: migrate
+          image: {{ include "employee-api.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          command: ["node", "src/db/migrate.js"]
+          envFrom:
+            - configMapRef:
+                name: {{ include "employee-api.configMapName" . }}
+          env:
+            {{- include "employee-api.env" . | nindent 12 }}
+            - name: DB_WAIT_SECONDS
+              value: {{ .Values.migrations.waitForDatabaseSeconds | quote }}
+          resources:
+            {{- toYaml .Values.migrations.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 32Mi
+{{- end }}

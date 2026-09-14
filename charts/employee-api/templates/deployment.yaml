@@ -1,0 +1,205 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "employee-api.fullname" . }}
+  namespace: {{ include "employee-api.namespace" . }}
+  labels:
+    {{- include "employee-api.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  revisionHistoryLimit: 5
+  strategy:
+    {{- toYaml .Values.strategy | nindent 4 }}
+  selector:
+    matchLabels:
+      {{- include "employee-api.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: api
+  template:
+    metadata:
+      labels:
+        {{- include "employee-api.labels" . | nindent 8 }}
+        app.kubernetes.io/component: api
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        # Restart pods when configuration changes. Without these, editing the
+        # ConfigMap or Secret leaves the running pods on the old values until
+        # something else happens to restart them.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if not .Values.secrets.existingSecret }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
+        {{- if .Values.istio.enabled }}
+        sidecar.istio.io/inject: "true"
+        # Wait for the sidecar to be ready before starting the app container,
+        # otherwise the first outbound connections (to Postgres) are made
+        # before Envoy is listening and fail.
+        proxy.istio.io/config: '{"holdApplicationUntilProxyStarts": true}'
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "employee-api.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+      {{- with .Values.image.pullSecretName }}
+      imagePullSecrets:
+        - name: {{ . }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+
+      {{- if .Values.podAntiAffinity.enabled }}
+      affinity:
+        podAntiAffinity:
+          {{- if eq .Values.podAntiAffinity.type "hard" }}
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  {{- include "employee-api.selectorLabels" . | nindent 18 }}
+              topologyKey: kubernetes.io/hostname
+          {{- else }}
+          # "preferred" so the release still schedules on a single-node
+          # cluster; "hard" would leave replicas Pending.
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    {{- include "employee-api.selectorLabels" . | nindent 20 }}
+                topologyKey: kubernetes.io/hostname
+          {{- end }}
+      {{- else }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- end }}
+
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+
+      {{- if and .Values.migrations.enabled (eq .Values.migrations.strategy "initContainer") }}
+      initContainers:
+        # Applies migrations before the app container starts, so a pod can
+        # never serve traffic against an un-migrated schema. The runner waits
+        # for the database itself, takes an advisory lock and is idempotent —
+        # so with several replicas one pod migrates and the others no-op.
+        - name: migrate
+          image: {{ include "employee-api.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          command: ["node", "src/db/migrate.js"]
+          envFrom:
+            - configMapRef:
+                name: {{ include "employee-api.configMapName" . }}
+          env:
+            {{- include "employee-api.env" . | nindent 12 }}
+            - name: DB_WAIT_SECONDS
+              value: {{ .Values.migrations.waitForDatabaseSeconds | quote }}
+          resources:
+            {{- toYaml .Values.migrations.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      {{- end }}
+
+      containers:
+        - name: api
+          image: {{ include "employee-api.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.targetPort }}
+              protocol: TCP
+            - name: metrics
+              containerPort: {{ .Values.service.metricsPort }}
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "employee-api.configMapName" . }}
+          env:
+            {{- include "employee-api.env" . | nindent 12 }}
+            - name: APP_VERSION
+              value: {{ .Chart.AppVersion | quote }}
+            - name: GIT_COMMIT
+              value: {{ default .Chart.AppVersion .Values.image.tag | quote }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+
+          {{- if .Values.probes.startup.enabled }}
+          # Gives a slow first start time to settle before liveness can kill it.
+          startupProbe:
+            httpGet:
+              path: {{ .Values.probes.startup.path }}
+              port: http
+            periodSeconds: {{ .Values.probes.startup.periodSeconds }}
+            failureThreshold: {{ .Values.probes.startup.failureThreshold }}
+          {{- end }}
+          {{- if .Values.probes.liveness.enabled }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.probes.liveness.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+          {{- end }}
+          {{- if .Values.probes.readiness.enabled }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.probes.readiness.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+          {{- end }}
+
+          {{- if .Values.lifecycle.preStop.enabled }}
+          lifecycle:
+            preStop:
+              # Endpoint removal is asynchronous: traffic keeps arriving for a
+              # moment after the pod is marked Terminating. Pausing here means
+              # the process is still serving during that window. The app also
+              # fails readiness immediately on SIGTERM.
+              {{- if eq .Values.lifecycle.preStop.mode "sleep" }}
+              # Native action — requires Kubernetes 1.29+.
+              sleep:
+                seconds: {{ .Values.lifecycle.preStop.seconds }}
+              {{- else }}
+              exec:
+                command: ["/bin/sleep", {{ .Values.lifecycle.preStop.seconds | quote }}]
+              {{- end }}
+          {{- end }}
+
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+
+          volumeMounts:
+            # readOnlyRootFilesystem is on, so anything that needs to write
+            # gets an explicit emptyDir.
+            - name: tmp
+              mountPath: /tmp
+
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi

@@ -1,0 +1,511 @@
+# =============================================================================
+# Employee API — default values
+# =============================================================================
+#
+# Every configuration value and every secret the deployment needs lives in this
+# file. Non-secret values become a ConfigMap; everything under `secrets:`
+# becomes a Kubernetes Secret and is injected as environment variables.
+#
+# -----------------------------------------------------------------------------
+# READ THIS ABOUT SECRETS
+# -----------------------------------------------------------------------------
+# Secrets in a values file are only as private as the file. This one holds
+# development defaults and is safe to commit. For anything real:
+#
+#   1. Keep production secrets OUT of git and pass them at install time:
+#        helm upgrade --install employee-api ./charts/employee-api \
+#          --namespace employee-app \
+#          -f values-prod.yaml \
+#          --set secrets.dbPassword="$DB_PASSWORD" \
+#          --set secrets.postgresPassword="$DB_PASSWORD"
+#
+#   2. Or encrypt the values file with SOPS or git-crypt and decrypt in CI.
+#
+#   3. Or set `secrets.existingSecret` to a Secret you manage separately with
+#      External Secrets Operator, Sealed Secrets or Vault. When that is set,
+#      this chart creates no Secret of its own and the values below are unused.
+#
+# A Kubernetes Secret is base64-encoded, not encrypted. Anyone with `get
+# secrets` in this namespace can read it — hence the RBAC and the
+# AuthorizationPolicy further down.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Namespace
+# -----------------------------------------------------------------------------
+namespace:
+  # Render a Namespace object as part of the release. Install with
+  # `--namespace employee-app` and WITHOUT `--create-namespace` so Helm owns it
+  # and the Istio label below is applied.
+  #
+  # Set to false if the namespace already exists or is managed elsewhere; then
+  # label it yourself:
+  #   kubectl label namespace employee-app istio-injection=enabled
+  create: true
+  name: employee-app
+
+  # Istio sidecar injection. Without this label no sidecar is injected, and
+  # mTLS, the VirtualService routing and the AuthorizationPolicy below have
+  # nothing to act on.
+  istioInjection: true
+
+  labels: {}
+  annotations: {}
+
+# -----------------------------------------------------------------------------
+# Application image
+# -----------------------------------------------------------------------------
+image:
+  # Set this to your Docker Hub account. The CI workflow pushes
+  # <registry>/<repository>:<commit-sha>.
+  registry: docker.io
+  repository: YOUR_DOCKERHUB_USERNAME/employee-api
+  # Overridden per deploy with the commit hash, e.g.
+  #   --set image.tag=$(git rev-parse --short HEAD)
+  # Defaults to the chart's appVersion when empty.
+  tag: ""
+  # IfNotPresent is right for immutable commit-sha tags: the node never
+  # re-pulls a tag it already has, which is both faster and deterministic.
+  pullPolicy: IfNotPresent
+  # Name of an imagePullSecret for a private repository. Leave empty for public.
+  pullSecretName: ""
+
+# -----------------------------------------------------------------------------
+# Deployment
+# -----------------------------------------------------------------------------
+replicaCount: 2
+
+# Ignored when autoscaling.enabled is true — the HPA owns the replica count.
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxSurge: 1
+    # Zero unavailable keeps capacity flat during a rollout. With 2 replicas
+    # and maxSurge 1 the rollout is one pod at a time.
+    maxUnavailable: 0
+
+# Time Kubernetes waits after SIGTERM before SIGKILL. Must exceed the app's
+# preStopDelayMs + shutdownTimeoutMs (5s + 10s) with room to spare.
+terminationGracePeriodSeconds: 45
+
+lifecycle:
+  preStop:
+    # Holds the container open briefly after it is marked Terminating, because
+    # endpoint removal is asynchronous and traffic keeps arriving for a moment.
+    enabled: true
+    seconds: 5
+    # "exec" runs `/bin/sleep N` and works on every Kubernetes version.
+    # "sleep" uses the native lifecycle action, which is cleaner but needs
+    # Kubernetes 1.29+ (beta) / 1.30+ (GA) and is rejected by older clusters.
+    mode: exec
+
+# Spread replicas across nodes so one node failure cannot take out the service.
+podAntiAffinity:
+  enabled: true
+  # "soft" (preferred) works on a single-node cluster; "hard" (required) will
+  # leave pods Pending if there are fewer nodes than replicas.
+  type: soft
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+podAnnotations: {}
+podLabels: {}
+
+# -----------------------------------------------------------------------------
+# Resources
+# -----------------------------------------------------------------------------
+# requests drive scheduling; limits cap the blast radius of a runaway pod.
+# No CPU limit on purpose: CPU limits cause throttling that shows up as
+# mysterious latency. Memory IS limited because memory is incompressible.
+resources:
+  requests:
+    cpu: 100m
+    memory: 192Mi
+  limits:
+    memory: 512Mi
+    # cpu: "1"   # uncomment only if your platform requires a CPU limit
+
+# -----------------------------------------------------------------------------
+# Probes
+# -----------------------------------------------------------------------------
+# Liveness never checks the database: if Postgres is down, restarting API pods
+# does not help and turns an outage into a CrashLoopBackOff. Readiness does
+# check it, so pods leave the Service until the database returns.
+probes:
+  liveness:
+    enabled: true
+    path: /healthz
+    initialDelaySeconds: 10
+    periodSeconds: 15
+    timeoutSeconds: 3
+    failureThreshold: 3
+  readiness:
+    enabled: true
+    path: /readyz
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 3
+    # Three consecutive failures (~30s) before traffic is withdrawn, so a
+    # brief database blip does not flap the endpoints.
+    failureThreshold: 3
+  startup:
+    enabled: true
+    path: /startupz
+    periodSeconds: 5
+    # 30 x 5s = 150s for a cold start before the liveness probe takes over.
+    failureThreshold: 30
+
+# -----------------------------------------------------------------------------
+# Security context
+# -----------------------------------------------------------------------------
+# Satisfies the Pod Security Standards "restricted" profile.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  privileged: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 1000
+  capabilities:
+    drop:
+      - ALL
+
+# -----------------------------------------------------------------------------
+# Service
+# -----------------------------------------------------------------------------
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 3000
+  metricsPort: 9090
+  annotations: {}
+
+# -----------------------------------------------------------------------------
+# Istio
+# -----------------------------------------------------------------------------
+istio:
+  enabled: true
+
+  gateway:
+    # Create a Gateway in this namespace. Set to false to attach the
+    # VirtualService to a shared gateway (set `gateway.existingGateway`).
+    create: true
+    # Selects the ingress gateway deployment. `istio: ingressgateway` is the
+    # label on the default istio-ingressgateway installed by istioctl/helm.
+    selector:
+      istio: ingressgateway
+    # Reference an existing Gateway instead, e.g.
+    # "istio-system/public-gateway".
+    existingGateway: ""
+
+    # Hostnames served. "*" accepts any Host header, which is convenient for
+    # a local cluster reached by IP or port-forward. Use a real hostname in
+    # production so the VirtualService cannot be reached by another name.
+    hosts:
+      - "*"
+
+    http:
+      enabled: true
+      port: 80
+    tls:
+      # Terminate TLS at the gateway. Requires `credentialName` to exist as a
+      # kubernetes.io/tls Secret in the ISTIO-SYSTEM namespace (not this one).
+      enabled: false
+      port: 443
+      credentialName: employee-api-tls
+      mode: SIMPLE
+      # Send 301 to HTTPS on the plaintext listener. Only with tls.enabled.
+      httpsRedirect: false
+
+  virtualService:
+    # Route prefixes forwarded to the service.
+    prefixes:
+      - /api
+      - /healthz
+      - /readyz
+    # Retry idempotent requests that fail on connection, so a rolling update
+    # does not surface as 503s to the caller.
+    retries:
+      attempts: 3
+      perTryTimeout: 2s
+      retryOn: connect-failure,refused-stream,gateway-error,unavailable
+    timeout: 15s
+    corsPolicy:
+      enabled: false
+      allowOrigins:
+        - exact: https://example.com
+      allowMethods: [GET, POST, PUT, DELETE, OPTIONS]
+
+  destinationRule:
+    enabled: true
+    # ISTIO_MUTUAL makes sidecar-to-sidecar traffic mTLS with Istio-issued
+    # certificates.
+    tlsMode: ISTIO_MUTUAL
+    connectionPool:
+      tcp:
+        maxConnections: 100
+        connectTimeout: 3s
+      http:
+        http1MaxPendingRequests: 64
+        http2MaxRequests: 100
+        maxRequestsPerConnection: 0
+    # Eject an endpoint that returns repeated 5xx, so a sick pod stops
+    # receiving traffic before the readiness probe notices.
+    outlierDetection:
+      consecutive5xxErrors: 5
+      interval: 10s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50
+
+  peerAuthentication:
+    # STRICT rejects any plaintext traffic to these pods. This is the control
+    # that makes "mTLS everywhere" true rather than aspirational.
+    enabled: true
+    mode: STRICT
+
+  authorizationPolicy:
+    # Deny by default, then allow only what should reach the app:
+    #   - the ingress gateway, for the public API paths
+    #   - Prometheus, for the metrics port
+    enabled: true
+    # Service account of the Istio ingress gateway.
+    ingressGatewayPrincipal: cluster.local/ns/istio-system/sa/istio-ingressgateway-service-account
+    # Namespaces allowed to scrape /metrics.
+    metricsScrapeNamespaces:
+      - istio-system
+      - monitoring
+
+# -----------------------------------------------------------------------------
+# Autoscaling
+# -----------------------------------------------------------------------------
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+  behavior:
+    scaleDown:
+      # Scale down slowly; scaling in during a traffic dip then back out is
+      # worse than holding a spare pod.
+      stabilizationWindowSeconds: 300
+
+# -----------------------------------------------------------------------------
+# Pod disruption budget
+# -----------------------------------------------------------------------------
+podDisruptionBudget:
+  enabled: true
+  # Keeps at least one pod serving during a node drain. With replicaCount 1
+  # this would block drains entirely, so it is only applied when replicas > 1.
+  minAvailable: 1
+
+# -----------------------------------------------------------------------------
+# Network policy
+# -----------------------------------------------------------------------------
+# Defence in depth behind the Istio policies: these are enforced by the CNI,
+# so they still apply if a sidecar is missing or bypassed.
+networkPolicy:
+  enabled: true
+  # Namespace the Istio ingress gateway runs in.
+  ingressNamespace: istio-system
+  # Namespace allowed to scrape metrics.
+  monitoringNamespace: monitoring
+  # DNS must be allowed or the app cannot resolve the database service.
+  allowDNS: true
+
+# -----------------------------------------------------------------------------
+# Service account and RBAC
+# -----------------------------------------------------------------------------
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+  # This app never calls the Kubernetes API, so it gets no token. Removing it
+  # means a compromised container has no cluster credentials to steal.
+  automountServiceAccountToken: false
+
+# -----------------------------------------------------------------------------
+# Application configuration (non-secret) -> ConfigMap
+# -----------------------------------------------------------------------------
+config:
+  nodeEnv: production
+  logLevel: info
+  logPretty: "false"
+  port: "3000"
+  metricsPort: "9090"
+
+  rateLimitEnabled: "true"
+  rateLimitWindowMs: "60000"
+  rateLimitMax: "120"
+
+  metricsEnabled: "true"
+
+  dbPoolMax: "10"
+  dbSsl: "false"
+  dbConnectionTimeoutMs: "5000"
+  dbStatementTimeoutMs: "10000"
+
+  shutdownTimeoutMs: "10000"
+  preStopDelayMs: "5000"
+
+# Free-form extra environment variables, e.g.
+#   extraEnv:
+#     - name: FEATURE_X
+#       value: "true"
+extraEnv: []
+
+# -----------------------------------------------------------------------------
+# Secrets -> Kubernetes Secret
+# -----------------------------------------------------------------------------
+secrets:
+  # Use a Secret you manage elsewhere (External Secrets, Sealed Secrets, Vault)
+  # instead of creating one from these values. Must contain the keys:
+  #   DB_USER, DB_PASSWORD, DB_NAME
+  existingSecret: ""
+
+  # Application's database credentials.
+  dbName: employees
+  dbUser: employee_app
+  # CHANGE THIS. Development default only.
+  dbPassword: "ChangeMe-Dev-Only-8chars"
+
+  # Superuser password for the bundled PostgreSQL. Ignored when
+  # postgresql.enabled is false.
+  postgresPassword: "ChangeMe-Dev-Only-8chars"
+
+# -----------------------------------------------------------------------------
+# Database migrations
+# -----------------------------------------------------------------------------
+migrations:
+  enabled: true
+
+  # How migrations run. The runner is idempotent and takes a Postgres advisory
+  # lock, so repeated or concurrent runs are safe either way.
+  #
+  # initContainer (default)
+  #   Every API pod runs migrations before its app container starts. Correct in
+  #   all orderings: on a fresh install the pod simply waits for the database
+  #   that is being created alongside it, and no pod can ever serve traffic
+  #   against an un-migrated schema. After the first pod succeeds the rest are
+  #   a sub-second no-op.
+  #
+  # hook
+  #   A Helm post-install/pre-upgrade Job. Gives release-level failure
+  #   semantics (a bad migration fails `helm upgrade`), which some teams
+  #   prefer. Note it CANNOT be pre-install: Helm runs pre-install hooks before
+  #   the PostgreSQL StatefulSet exists, so the Job would wait for a database
+  #   that has not been created yet.
+  #
+  # none
+  #   Run migrations yourself, out of band.
+  strategy: initContainer
+
+  # Seconds the migration runner waits for the database before giving up.
+  waitForDatabaseSeconds: 120
+
+  backoffLimit: 3
+  activeDeadlineSeconds: 300
+  # Keep the Job on failure so `kubectl logs` can explain what went wrong.
+  # Successful Jobs are deleted.
+  hookDeletePolicy: before-hook-creation,hook-succeeded
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+
+# -----------------------------------------------------------------------------
+# PostgreSQL (bundled, for development and evaluation)
+# -----------------------------------------------------------------------------
+# A single-replica StatefulSet: simple, durable enough for a demo, and NOT
+# highly available. For production use a managed database (RDS, Cloud SQL,
+# Azure Database) or an operator such as CloudNativePG, then set
+# `postgresql.enabled: false` and fill in `externalDatabase`.
+postgresql:
+  enabled: true
+
+  image:
+    registry: docker.io
+    repository: postgres
+    tag: "16-alpine"
+    pullPolicy: IfNotPresent
+
+  # Must match secrets.dbName / secrets.dbUser above.
+  auth:
+    database: employees
+    username: employee_app
+
+  service:
+    port: 5432
+
+  persistence:
+    enabled: true
+    size: 8Gi
+    # Empty uses the cluster default StorageClass.
+    storageClass: ""
+    accessMode: ReadWriteOnce
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 1Gi
+
+  # Postgres needs to write to its data directory, so the root filesystem is
+  # not read-only here; everything else is still locked down.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 70        # the `postgres` user in the alpine image
+    runAsGroup: 70
+    fsGroup: 70
+    seccompProfile:
+      type: RuntimeDefault
+
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: false
+    capabilities:
+      drop:
+        - ALL
+
+  # Sidecar injection is disabled for the database: Istio in front of a
+  # StatefulSet complicates startup ordering for no benefit here, and the
+  # NetworkPolicy already restricts who can reach port 5432.
+  istioSidecarInject: false
+
+# Used when postgresql.enabled is false.
+externalDatabase:
+  host: ""
+  port: 5432
+
+# -----------------------------------------------------------------------------
+# Monitoring
+# -----------------------------------------------------------------------------
+metrics:
+  serviceMonitor:
+    # Requires the Prometheus Operator CRDs. Off by default so `helm install`
+    # works on a cluster without them.
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    labels: {}
+
+# -----------------------------------------------------------------------------
+# Helm test hooks
+# -----------------------------------------------------------------------------
+tests:
+  enabled: true
+  image:
+    repository: curlimages/curl
+    tag: "8.11.1"

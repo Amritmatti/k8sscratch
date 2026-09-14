@@ -1,0 +1,56 @@
+{{- if .Values.istio.enabled }}
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: {{ include "employee-api.fullname" . }}
+  namespace: {{ include "employee-api.namespace" . }}
+  labels:
+    {{- include "employee-api.labels" . | nindent 4 }}
+spec:
+  hosts:
+    {{- toYaml .Values.istio.gateway.hosts | nindent 4 }}
+  gateways:
+    {{- if .Values.istio.gateway.create }}
+    - {{ include "employee-api.fullname" . }}
+    {{- else }}
+    - {{ required "istio.gateway.existingGateway is required when gateway.create is false" .Values.istio.gateway.existingGateway }}
+    {{- end }}
+  http:
+    - name: api
+      match:
+        {{- range .Values.istio.virtualService.prefixes }}
+        - uri:
+            prefix: {{ . | quote }}
+        {{- end }}
+      route:
+        - destination:
+            host: {{ include "employee-api.fullname" . }}.{{ include "employee-api.namespace" . }}.svc.cluster.local
+            port:
+              number: {{ .Values.service.port }}
+      {{- with .Values.istio.virtualService.retries }}
+      # Retries cover the window during a rolling update where a pod has gone
+      # but its endpoint has not been withdrawn yet. Only safe because every
+      # retried condition here is a failure to connect, not a failed write.
+      retries:
+        attempts: {{ .attempts }}
+        perTryTimeout: {{ .perTryTimeout }}
+        retryOn: {{ .retryOn | quote }}
+      {{- end }}
+      {{- with .Values.istio.virtualService.timeout }}
+      timeout: {{ . }}
+      {{- end }}
+      {{- if .Values.istio.virtualService.corsPolicy.enabled }}
+      corsPolicy:
+        allowOrigins:
+          {{- toYaml .Values.istio.virtualService.corsPolicy.allowOrigins | nindent 10 }}
+        allowMethods:
+          {{- toYaml .Values.istio.virtualService.corsPolicy.allowMethods | nindent 10 }}
+      {{- end }}
+      headers:
+        response:
+          set:
+            # Belt and braces: the app sets these too, but the mesh guarantees
+            # them even if a future handler forgets.
+            X-Content-Type-Options: nosniff
+            X-Frame-Options: DENY
+{{- end }}

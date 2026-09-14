@@ -1,0 +1,151 @@
+# Build the application image and push it to Docker Hub tagged with the commit
+# hash.
+#
+# The commit hash is the whole point: it is immutable, so a running deployment
+# can always be traced back to exactly one commit. `latest` is also pushed from
+# the default branch as a convenience, but never deploy from it — you cannot
+# tell what it points at, and a node restart can silently change the version.
+#
+# Required repository secrets (Settings -> Secrets and variables -> Actions):
+#   DOCKERHUB_USERNAME   your Docker Hub account name
+#   DOCKERHUB_TOKEN      an access token from hub.docker.com/settings/security
+#                        (an access token, NOT your password — it can be
+#                        scoped and revoked independently)
+#
+# Optional repository variable:
+#   DOCKERHUB_REPOSITORY  image name, defaults to <username>/employee-api
+
+name: Build and Push Docker Image
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - develop
+    tags:
+      - 'v*'
+    paths:
+      # Only rebuild when something that lands in the image changes.
+      - 'app/**'
+      - '.github/workflows/docker-build-push.yml'
+  pull_request:
+    paths:
+      - 'app/**'
+  workflow_dispatch:
+    inputs:
+      push_image:
+        description: 'Push to Docker Hub (otherwise build only)'
+        type: boolean
+        default: true
+
+concurrency:
+  # Supersede an in-flight run for the same branch; keep tag builds.
+  group: docker-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-push:
+    name: Build and push
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Derive image tags
+        id: meta
+        run: |
+          set -euo pipefail
+
+          SHA_SHORT="$(git rev-parse --short=7 HEAD)"
+          SHA_FULL="$(git rev-parse HEAD)"
+
+          REPO="${{ vars.DOCKERHUB_REPOSITORY }}"
+          if [ -z "$REPO" ]; then
+            REPO="${{ secrets.DOCKERHUB_USERNAME }}/employee-api"
+          fi
+
+          # The commit hash tag — the deployable identifier.
+          TAGS="${REPO}:${SHA_SHORT}"
+          TAGS="${TAGS},${REPO}:${SHA_FULL}"
+
+          # Convenience tags. Not for deployment.
+          if [ "${{ github.ref }}" = "refs/heads/main" ] || [ "${{ github.ref }}" = "refs/heads/master" ]; then
+            TAGS="${TAGS},${REPO}:latest"
+          fi
+          if [ "${{ startsWith(github.ref, 'refs/tags/v') }}" = "true" ]; then
+            TAGS="${TAGS},${REPO}:${GITHUB_REF#refs/tags/}"
+          fi
+
+          {
+            echo "tags=${TAGS}"
+            echo "repository=${REPO}"
+            echo "sha_short=${SHA_SHORT}"
+            echo "sha_full=${SHA_FULL}"
+            echo "build_date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Image tags:"
+          echo "${TAGS}" | tr ',' '\n' | sed 's/^/  /'
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Skipped for pull requests from forks, which have no access to secrets.
+      - name: Log in to Docker Hub
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ./app
+          file: ./app/Dockerfile
+          # A pull request build verifies the Dockerfile without publishing.
+          push: ${{ github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || inputs.push_image) }}
+          tags: ${{ steps.meta.outputs.tags }}
+          platforms: linux/amd64,linux/arm64
+          # GitHub Actions layer cache: unchanged dependency layers are reused
+          # across runs, so a code-only change builds in seconds.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            GIT_COMMIT=${{ steps.meta.outputs.sha_full }}
+            APP_VERSION=${{ steps.meta.outputs.sha_short }}
+            BUILD_DATE=${{ steps.meta.outputs.build_date }}
+          provenance: true
+          sbom: true
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Docker image"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Repository | \`${{ steps.meta.outputs.repository }}\` |"
+            echo "| Commit tag | \`${{ steps.meta.outputs.sha_short }}\` |"
+            echo "| Digest | \`${{ steps.build.outputs.digest }}\` |"
+            echo "| Pushed | ${{ github.event_name != 'pull_request' }} |"
+            echo ""
+            echo "Deploy this exact build:"
+            echo ""
+            echo '```bash'
+            echo "helm upgrade --install employee-api ./charts/employee-api \\"
+            echo "  --namespace employee-app --create-namespace \\"
+            echo "  --set image.repository=${{ steps.meta.outputs.repository }} \\"
+            echo "  --set image.tag=${{ steps.meta.outputs.sha_short }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

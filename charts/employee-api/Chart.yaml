@@ -1,0 +1,33 @@
+apiVersion: v2
+name: employee-api
+description: |
+  Employee records API — Node.js + PostgreSQL on Kubernetes.
+
+  Deploys into a dedicated namespace with Istio sidecar injection, exposes the
+  API through an Istio Gateway and VirtualService, runs schema migrations as a
+  pre-upgrade hook, and enforces mTLS plus least-privilege network and
+  authorization policy.
+
+type: application
+
+# Chart version — bump on any chart change.
+version: 1.0.0
+
+# Version of the application this chart deploys by default. Overridden per
+# deploy with `--set image.tag=<commit-sha>`; the CI pipeline tags images with
+# the commit hash.
+appVersion: "1.0.0"
+
+keywords:
+  - employee
+  - nodejs
+  - postgresql
+  - istio
+  - devsecops
+
+maintainers:
+  - name: Platform Team
+
+annotations:
+  category: Application
+  licenses: MIT

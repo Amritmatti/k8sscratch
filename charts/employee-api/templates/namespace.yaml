@@ -1,0 +1,30 @@
+{{- if .Values.namespace.create }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ include "employee-api.namespace" . }}
+  labels:
+    {{- include "employee-api.labels" . | nindent 4 }}
+    {{- if .Values.namespace.istioInjection }}
+    # Tells the Istio mutating webhook to inject a sidecar into every pod
+    # created in this namespace. Without it, mTLS, the VirtualService routing
+    # and the AuthorizationPolicy have nothing to enforce.
+    istio-injection: enabled
+    {{- end }}
+    # Pod Security Admission: reject anything that does not meet the
+    # "restricted" profile, enforced by the API server itself.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+    {{- with .Values.namespace.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  annotations:
+    # Helm must not delete the namespace on uninstall — that would take the
+    # PersistentVolumeClaim, and the database with it.
+    helm.sh/resource-policy: keep
+    {{- with .Values.namespace.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}

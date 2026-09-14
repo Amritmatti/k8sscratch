@@ -1,0 +1,64 @@
+{{- if .Values.tests.enabled }}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "employee-api.fullname" . }}-test
+  namespace: {{ include "employee-api.namespace" . }}
+  labels:
+    {{- include "employee-api.labels" . | nindent 4 }}
+    app.kubernetes.io/component: test
+  annotations:
+    # Run with: helm test employee-api -n employee-app
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+    # No sidecar: the pod must terminate for `helm test` to finish.
+    sidecar.istio.io/inject: "false"
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: smoke-test
+      image: "{{ .Values.tests.image.repository }}:{{ .Values.tests.image.tag }}"
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: [ALL]
+      command:
+        - sh
+        - -c
+        - |
+          set -eu
+          BASE="http://{{ include "employee-api.fullname" . }}.{{ include "employee-api.namespace" . }}.svc.cluster.local:{{ .Values.service.port }}"
+
+          echo "1/4 liveness"
+          curl -fsS --max-time 10 "$BASE/healthz" | grep -q '"status":"ok"'
+
+          echo "2/4 readiness (database reachable)"
+          curl -fsS --max-time 10 "$BASE/readyz" | grep -q '"database":"ok"'
+
+          echo "3/4 create an employee"
+          CREATED=$(curl -fsS --max-time 10 -X POST "$BASE/api/v1/employees" \
+            -H 'Content-Type: application/json' \
+            -d '{"name":"Helm Test","dob":"1990-01-01","designation":"QA","doj":"2020-01-01"}')
+          echo "$CREATED" | grep -q '"name":"Helm Test"'
+          ID=$(echo "$CREATED" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+
+          echo "4/4 read it back and clean up (id=$ID)"
+          curl -fsS --max-time 10 "$BASE/api/v1/employees/$ID" | grep -q '"designation":"QA"'
+          curl -fsS --max-time 10 -X DELETE -o /dev/null -w '%{http_code}' \
+            "$BASE/api/v1/employees/$ID" | grep -q 204
+
+          echo "All smoke tests passed."
+      resources:
+        requests:
+          cpu: 10m
+          memory: 32Mi
+        limits:
+          memory: 64Mi
+{{- end }}

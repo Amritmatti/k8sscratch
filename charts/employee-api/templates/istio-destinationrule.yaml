@@ -1,0 +1,27 @@
+{{- if and .Values.istio.enabled .Values.istio.destinationRule.enabled }}
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: {{ include "employee-api.fullname" . }}
+  namespace: {{ include "employee-api.namespace" . }}
+  labels:
+    {{- include "employee-api.labels" . | nindent 4 }}
+spec:
+  host: {{ include "employee-api.fullname" . }}.{{ include "employee-api.namespace" . }}.svc.cluster.local
+  trafficPolicy:
+    tls:
+      # ISTIO_MUTUAL: the sidecar presents its workload certificate, so traffic
+      # between gateway and app is mTLS with identities Istio issues and
+      # rotates. Pairs with the STRICT PeerAuthentication.
+      mode: {{ .Values.istio.destinationRule.tlsMode }}
+    {{- with .Values.istio.destinationRule.connectionPool }}
+    connectionPool:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with .Values.istio.destinationRule.outlierDetection }}
+    # Passive health checking: a pod returning repeated 5xx is ejected from the
+    # load balancing pool without waiting for the readiness probe.
+    outlierDetection:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+{{- end }}

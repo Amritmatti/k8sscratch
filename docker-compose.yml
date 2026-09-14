@@ -1,0 +1,111 @@
+# Local development stack.
+#
+# This is NOT the deployment path — Kubernetes + Helm is. It exists so the app
+# can be built and exercised against a real PostgreSQL before anything reaches
+# a cluster, and so `npm run test:integration` has a database to talk to.
+#
+#   docker compose up --build        start Postgres, migrate, then the API
+#   docker compose run --rm migrate  re-apply migrations on their own
+#   docker compose logs -f api       follow application logs
+#   docker compose down -v           stop and delete the data volume
+#
+# Host ports default to 3080 (API), 9091 (metrics) and 55432 (Postgres) to
+# avoid the commonly-occupied 3000/9090/5432. Override with API_PORT,
+# METRICS_HOST_PORT and POSTGRES_PORT.
+
+name: employee-api
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: employee-postgres
+    environment:
+      POSTGRES_DB: employees
+      POSTGRES_USER: employee_app
+      # Local only. Real credentials come from the Helm values file.
+      POSTGRES_PASSWORD: local-dev-password
+      # Slightly faster startup; the data here is disposable.
+      POSTGRES_INITDB_ARGS: '--auth-host=scram-sha-256'
+    ports:
+      # Host ports are overridable because 3000/5432/9090 are commonly taken.
+      # Override in .env or inline: API_PORT=3080 docker compose up
+      - '${POSTGRES_PORT:-55432}:5432'
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      # `pg_isready` alone returns true before the DB accepts writes, so query.
+      test: ['CMD-SHELL', 'pg_isready -U employee_app -d employees && psql -U employee_app -d employees -c "SELECT 1" || exit 1']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  migrate:
+    build:
+      context: ./app
+      args:
+        GIT_COMMIT: local
+        APP_VERSION: dev
+    command: ['node', 'src/db/migrate.js']
+    environment:
+      NODE_ENV: production
+      DB_HOST: postgres
+      DB_PORT: '5432'
+      DB_NAME: employees
+      DB_USER: employee_app
+      DB_PASSWORD: local-dev-password
+      LOG_PRETTY: 'true'
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: 'no'
+
+  api:
+    build:
+      context: ./app
+      args:
+        GIT_COMMIT: local
+        APP_VERSION: dev
+    container_name: employee-api
+    ports:
+      - '${API_PORT:-3080}:3000'
+      - '${METRICS_HOST_PORT:-9091}:9090'
+    environment:
+      NODE_ENV: production
+      PORT: '3000'
+      METRICS_PORT: '9090'
+      LOG_LEVEL: debug
+      LOG_PRETTY: 'true'
+      DB_HOST: postgres
+      DB_PORT: '5432'
+      DB_NAME: employees
+      DB_USER: employee_app
+      DB_PASSWORD: local-dev-password
+      RATE_LIMIT_ENABLED: 'true'
+      RATE_LIMIT_MAX: '1000'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:3000/readyz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    # Mirrors the Kubernetes securityContext so local runs surface the same
+    # permission problems the cluster would.
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+    driver: local

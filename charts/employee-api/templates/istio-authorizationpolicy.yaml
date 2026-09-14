@@ -1,0 +1,96 @@
+{{- if and .Values.istio.enabled .Values.istio.authorizationPolicy.enabled }}
+{{- $fullName := include "employee-api.fullname" . -}}
+{{- $ns := include "employee-api.namespace" . -}}
+---
+# 1. Default deny. With no ALLOW rule matching, every request to a workload in
+#    this namespace is refused. Everything below opens specific holes.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: {{ $fullName }}-deny-all
+  namespace: {{ $ns }}
+  labels:
+    {{- include "employee-api.labels" . | nindent 4 }}
+spec:
+  # An empty spec is "deny everything not explicitly allowed".
+  {}
+---
+# 2. Allow the Istio ingress gateway to reach the public API paths.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: {{ $fullName }}-allow-gateway
+  namespace: {{ $ns }}
+  labels:
+    {{- include "employee-api.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "employee-api.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: api
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            # Identity, not IP: this is the gateway's SPIFFE identity from its
+            # mTLS certificate, which cannot be spoofed by another pod.
+            principals:
+              - {{ .Values.istio.authorizationPolicy.ingressGatewayPrincipal | quote }}
+      to:
+        - operation:
+            methods: [GET, POST, PUT, DELETE, OPTIONS]
+            paths:
+              - /api/*
+              - /healthz
+              - /readyz
+---
+# 3. Allow metrics scraping from the monitoring namespaces only.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: {{ $fullName }}-allow-metrics
+  namespace: {{ $ns }}
+  labels:
+    {{- include "employee-api.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "employee-api.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: api
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            namespaces:
+              {{- toYaml .Values.istio.authorizationPolicy.metricsScrapeNamespaces | nindent 14 }}
+      to:
+        - operation:
+            methods: [GET]
+            ports:
+              - {{ .Values.service.metricsPort | quote }}
+---
+# 4. Allow the kubelet's probes. These arrive from the node, outside the mesh,
+#    so they have no peer identity — without this the sidecar would reject
+#    them and every pod would fail its readiness check.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: {{ $fullName }}-allow-probes
+  namespace: {{ $ns }}
+  labels:
+    {{- include "employee-api.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "employee-api.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: api
+  action: ALLOW
+  rules:
+    - to:
+        - operation:
+            methods: [GET]
+            paths:
+              - /healthz
+              - /readyz
+              - /startupz
+{{- end }}

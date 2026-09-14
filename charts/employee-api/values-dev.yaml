@@ -1,0 +1,68 @@
+# Development overrides.
+#   helm upgrade --install employee-api ./charts/employee-api \
+#     -n employee-dev -f charts/employee-api/values-dev.yaml
+#
+# Optimised for a small local cluster: one replica, small resources, verbose
+# logs, and relaxed limits so testing is not throttled.
+
+namespace:
+  name: employee-dev
+
+replicaCount: 1
+
+image:
+  tag: ""          # set to the commit SHA in CI
+  pullPolicy: IfNotPresent
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    memory: 384Mi
+
+config:
+  nodeEnv: production      # keep production code paths; only logging differs
+  logLevel: debug
+  rateLimitMax: "10000"    # do not throttle test runs
+
+autoscaling:
+  enabled: false
+
+# With one replica a PDB of minAvailable 1 would block node drains.
+podDisruptionBudget:
+  enabled: false
+
+podAntiAffinity:
+  enabled: false           # single-node clusters have nowhere to spread to
+
+postgresql:
+  enabled: true
+  persistence:
+    enabled: true
+    size: 2Gi
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+
+istio:
+  enabled: true
+  gateway:
+    hosts:
+      - "*"                # reachable by IP or port-forward
+    tls:
+      enabled: false
+  authorizationPolicy:
+    # Off in dev: it makes `kubectl port-forward` straight to the pod fail,
+    # which is the first thing people try when debugging.
+    enabled: false
+
+networkPolicy:
+  enabled: true
+
+secrets:
+  dbPassword: "dev-password-change-me"
+  postgresPassword: "dev-password-change-me"

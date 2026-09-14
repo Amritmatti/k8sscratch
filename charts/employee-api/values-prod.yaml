@@ -1,0 +1,90 @@
+# Production overrides.
+#   helm upgrade --install employee-api ./charts/employee-api \
+#     -n employee-prod -f charts/employee-api/values-prod.yaml \
+#     --set image.tag=$GIT_SHA \
+#     --set secrets.dbPassword="$DB_PASSWORD"
+#
+# Secrets are deliberately NOT set here. Supply them with --set from a secret
+# manager, or set secrets.existingSecret and let External Secrets create it.
+
+namespace:
+  name: employee-prod
+
+replicaCount: 3
+
+image:
+  pullPolicy: IfNotPresent
+  # tag MUST be pinned to an immutable commit SHA. Never "latest": you cannot
+  # tell what is running, and a node restart can silently change the version.
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits:
+    memory: 768Mi
+
+config:
+  nodeEnv: production
+  logLevel: info
+  logPretty: "false"
+  rateLimitMax: "120"
+  dbPoolMax: "20"
+  dbSsl: "true"
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 12
+  targetCPUUtilizationPercentage: 70
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2
+
+podAntiAffinity:
+  enabled: true
+  type: hard              # requires at least as many nodes as replicas
+
+istio:
+  enabled: true
+  gateway:
+    hosts:
+      - employees.example.com
+    http:
+      enabled: true
+    tls:
+      enabled: true
+      credentialName: employee-api-tls   # Secret must exist in istio-system
+      httpsRedirect: true
+  peerAuthentication:
+    enabled: true
+    mode: STRICT
+  authorizationPolicy:
+    enabled: true
+  virtualService:
+    corsPolicy:
+      enabled: true
+      allowOrigins:
+        - exact: https://employees.example.com
+      allowMethods: [GET, POST, PUT, DELETE, OPTIONS]
+
+networkPolicy:
+  enabled: true
+
+metrics:
+  serviceMonitor:
+    enabled: true
+
+# Use a managed database in production. The bundled StatefulSet has no
+# failover, no backups and no point-in-time recovery.
+postgresql:
+  enabled: false
+
+externalDatabase:
+  host: employee-db.prod.internal
+  port: 5432
+
+secrets:
+  # Populate from a secret manager rather than committing values.
+  existingSecret: employee-api-db-credentials
