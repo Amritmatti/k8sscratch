@@ -610,13 +610,13 @@ Everything else in `values.yaml` works as shipped.
 
 | Key | Shipped | Set to | Why |
 |---|---|---|---|
-| `image.repository` | `amritmatti/employee-api` | `employee-api` (side-load) or `amritmatti/employee-api` | Literal placeholder → `ImagePullBackOff` |
+| `image.repository` | `amritmatti/employee-api` | `employee-api` **only when side-loading** | Correct as shipped for Docker Hub; the bare name is for locally imported images |
 | `image.registry` | `docker.io` | `""` when side-loading | Keeps the ref local so containerd does not try to pull |
 | `image.tag` | `""` → falls back to `1.0.0` | `dev`, or the commit SHA | `1.0.0` was never built or pushed |
 | `secrets.dbPassword` | `ChangeMe-Dev-Only-8chars` | generated | Committed default |
 | `secrets.postgresPassword` | `ChangeMe-Dev-Only-8chars` | generated, same value | Must match `dbPassword` — the bundled Postgres creates the app user from it |
 | `istio.enabled` | `true` | `false` for Phase 4, `true` after Phase 5 | Preflight fails without the CRDs |
-| `frontend.image.repository` | `amritmatti/employee-frontend` | `employee-frontend`, or `amritmatti/employee-frontend` | Literal placeholder → `ImagePullBackOff` |
+| `frontend.image.repository` | `amritmatti/employee-frontend` | `employee-frontend` **only when side-loading** | Correct as shipped for Docker Hub |
 | `frontend.image.registry` | `docker.io` | `""` when side-loading | Keeps the ref local |
 | `frontend.image.tag` | `""` → `1.0.0` | `dev`, or the commit SHA | `1.0.0` was never built |
 | `frontend.publicTls` | `false` | `true` only when TLS terminates in front | `true` over plain http breaks the UI's own assets |
@@ -644,7 +644,8 @@ Left alone deliberately:
 | `SSH_PASSWORD is set but 'sshpass' is not installed` | `cluster.conf` | Step 1.1 |
 | `Istio is not installed in this cluster` | Chart preflight | Phase 5, or `--set istio.enabled=false` |
 | Postgres pod `Pending`, PVC `Pending` | No default StorageClass | Phase 2 |
-| `ImagePullBackOff` on `amritmatti/...` | `image.repository` not overridden | Phase 3 |
+| `ImagePullBackOff`, `failed to resolve image: ... not found` | The name is valid but that **tag** was never built — usually a commit that was amended, never pushed, or whose CI build has not finished | Deploy a tag that exists: `docker manifest inspect amritmatti/employee-api:$TAG` before installing |
+| `InvalidImageName`, pod never contacts the registry | A `repository` value is not a legal image name (uppercase or `_`, e.g. a leftover placeholder) | Set `image.repository` / `frontend.image.repository` |
 | `ErrImageNeverPull` / `not found` with a local tag | Image not imported on the node the pod landed on | Re-run the Phase 3 loop on **all** workers |
 | `violates PodSecurity "restricted:latest"` | `istio-init` needs root + `NET_ADMIN` | Install `istio-cni` (5.2) |
 | `istio-ingressgateway` EXTERNAL-IP `<pending>` | No load-balancer on bare metal | Patch to NodePort (5.3) |

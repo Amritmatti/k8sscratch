@@ -95,16 +95,21 @@ kubectl annotate namespace employee-app \
   meta.helm.sh/release-name=employee-api \
   meta.helm.sh/release-namespace=employee-app --overwrite
 
-# 5. The release. Hex, not base64: `openssl rand -base64` emits '=' and '/',
+# 5. Pick the tag, and CHECK IT EXISTS before deploying to it. CI tags images
+#    with the commit hash, so a commit that was amended, never pushed, or
+#    whose build is still running has no image — and the only symptom is
+#    ImagePullBackOff several minutes later.
+export TAG=$(git rev-parse --short=7 HEAD)
+docker manifest inspect amritmatti/employee-api:$TAG      > /dev/null && echo "api ok"
+docker manifest inspect amritmatti/employee-frontend:$TAG > /dev/null && echo "ui ok"
+
+# 6. The release. Hex, not base64: `openssl rand -base64` emits '=' and '/',
 #    which break Helm's --set parser.
 export DB_PASSWORD="$(openssl rand -hex 16)"
-export TAG=$(git rev-parse --short=7 HEAD)
 
 helm upgrade --install employee-api ./charts/employee-api \
   --namespace employee-app \
-  --set image.repository=amritmatti/employee-api \
   --set image.tag=$TAG \
-  --set frontend.image.repository=amritmatti/employee-frontend \
   --set frontend.image.tag=$TAG \
   --set secrets.dbPassword="$DB_PASSWORD" \
   --set secrets.postgresPassword="$DB_PASSWORD" \
@@ -113,8 +118,37 @@ helm upgrade --install employee-api ./charts/employee-api \
 helm test employee-api -n employee-app
 ```
 
+`values.yaml` already points at `amritmatti/employee-api` and
+`amritmatti/employee-frontend`, so only the tag needs setting. Forking? Change
+those two `repository` values, or override them with
+`--set image.repository=... --set frontend.image.repository=...`.
+
 Both images must already be pushed, or side-loaded onto the nodes — see
 [docs/BUILD.md](docs/BUILD.md).
+
+### If the pods never start
+
+Almost every first-deploy failure is the image reference, and the two cases
+look different on purpose:
+
+| Pod status | What it means | Fix |
+|---|---|---|
+| `InvalidImageName` | The reference is not a legal image name — usually a `repository` left as a placeholder, since uppercase and `_` are illegal. The kubelet rejects it without ever contacting the registry. | Set `image.repository` / `frontend.image.repository` |
+| `ImagePullBackOff`, `failed to resolve image: ... not found` | The name is valid but that **tag** does not exist. The usual cause is pinning `$(git rev-parse HEAD)` for a commit that was amended, never pushed, or whose CI build has not finished. | Deploy a tag that exists — check step 5 |
+| `ImagePullBackOff`, `unauthorized` | The repository is private. | Add an imagePullSecret and set `image.pullSecretName` |
+
+```bash
+# what the pods are actually trying to pull
+kubectl get pods -n employee-app \
+  -o custom-columns='POD:.metadata.name,IMAGE:.spec.containers[*].image'
+
+# what is actually published
+docker manifest inspect amritmatti/employee-api:$TAG
+```
+
+> Docker Hub's **web UI lags the registry**, sometimes by an hour or more — it
+> will happily show an empty repository whose images pull fine.
+> `docker manifest inspect` is the reliable check, not the website.
 
 Reaching it: on bare metal the ingress gateway has no LoadBalancer address, so
 patch it to a NodePort and open `http://<node-ip>:<nodePort>/`.
