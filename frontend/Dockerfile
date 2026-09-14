@@ -22,6 +22,17 @@
 
 FROM nginxinc/nginx-unprivileged:1.27-alpine
 
+# Pick up OS packages patched after the base image was tagged. Without this the
+# image ships whatever musl/zlib/nghttp2/libxml2 the base was built with, and
+# the CI gate fails on fixable HIGH/CRITICAL findings in packages this
+# Dockerfile never installed.
+#
+# Briefly root because apk needs it; dropped again immediately below, and the
+# Pod securityContext enforces non-root regardless.
+USER root
+RUN apk upgrade --no-cache \
+    && rm -rf /var/cache/apk/*
+
 # Already the default in this base image; stated explicitly so that a base
 # image change can never silently promote this container to root.
 USER 101:101

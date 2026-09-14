@@ -111,21 +111,37 @@ jobs:
 
   # ---------------------------------------------------------------------------
   dockerfile-lint:
-    name: Dockerfile lint
+    name: Dockerfile lint (${{ matrix.dockerfile }})
     runs-on: ubuntu-latest
+    strategy:
+      # Lint both even if one fails, so a single bad line does not hide the
+      # state of the other image.
+      fail-fast: false
+      matrix:
+        dockerfile:
+          - app/Dockerfile
+          - frontend/Dockerfile
     steps:
       - uses: actions/checkout@v4
 
       - name: Hadolint
         uses: hadolint/hadolint-action@v3.1.0
         with:
-          dockerfile: app/Dockerfile
+          dockerfile: ${{ matrix.dockerfile }}
           failure-threshold: warning
 
   # ---------------------------------------------------------------------------
   image-scan:
-    name: Image vulnerability scan
+    name: Image scan (${{ matrix.image.name }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - name: employee-api
+            context: ./app
+          - name: employee-frontend
+            context: ./frontend
     env:
       # Keep the vulnerability database somewhere actions/cache can see it.
       # Uncached, every run re-downloads ~113 MB and eventually trips the
@@ -136,13 +152,15 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build image for scanning
-        run: docker build -t employee-api:scan ./app
+        run: docker build -t ${{ matrix.image.name }}:scan ${{ matrix.image.context }}
 
       - name: Cache the Trivy vulnerability database
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/.trivycache
-          key: trivy-db-${{ github.run_id }}
+          # Scoped per image: both matrix jobs run in parallel and would
+          # otherwise race to write the same cache key.
+          key: trivy-db-${{ matrix.image.name }}-${{ github.run_id }}
           restore-keys: trivy-db-
 
       # Two steps, deliberately.
@@ -158,22 +176,24 @@ jobs:
       - name: Trivy - full report for the Security tab
         uses: aquasecurity/trivy-action@v0.36.0
         with:
-          image-ref: employee-api:scan
+          image-ref: ${{ matrix.image.name }}:scan
           format: sarif
-          output: trivy-image.sarif
+          output: trivy-${{ matrix.image.name }}.sarif
           exit-code: '0'            # informational; the gate is the next step
 
       - name: Upload results
         if: always()
         uses: github/codeql-action/upload-sarif@v3
         with:
-          sarif_file: trivy-image.sarif
-          category: trivy-image
+          sarif_file: trivy-${{ matrix.image.name }}.sarif
+          # Unique category per image, or the second upload overwrites the
+          # first and the Security tab shows only one image's findings.
+          category: trivy-image-${{ matrix.image.name }}
 
       - name: Trivy - gate on fixable HIGH/CRITICAL
         uses: aquasecurity/trivy-action@v0.36.0
         with:
-          image-ref: employee-api:scan
+          image-ref: ${{ matrix.image.name }}:scan
           # Table rather than sarif, so a failure prints the offending packages
           # straight into the job log.
           format: table

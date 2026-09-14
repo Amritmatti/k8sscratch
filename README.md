@@ -220,9 +220,11 @@ k8sscratch/
 │       └── tests/test-api.yaml   `helm test` smoke test
 │
 ├── .github/workflows/
-│   ├── docker-build-push.yml     build + push to Docker Hub (commit-hash tag)
-│   └── ci-security.yml           tests, npm audit, gitleaks, hadolint,
-│                                 Trivy image + manifest scans, kubeconform
+│   ├── docker-build-push.yml     build + push BOTH images to Docker Hub,
+│   │                             matrix over app/ and frontend/, one commit tag
+│   └── ci-security.yml           tests, npm audit, gitleaks, hadolint and
+│                                 Trivy image scans for both images,
+│                                 manifest scan, kubeconform
 │
 ├── docker-compose.yml            local stack
 ├── Makefile / scripts/task.ps1   task runners
