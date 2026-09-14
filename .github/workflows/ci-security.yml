@@ -133,7 +133,7 @@ jobs:
         run: docker build -t employee-api:scan ./app
 
       - name: Trivy (fail on HIGH/CRITICAL)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@0.36.0
         with:
           image-ref: employee-api:scan
           format: sarif
